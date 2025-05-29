@@ -14,7 +14,7 @@
  *   CDUP, CWD, PWD, QUIT, NOOP
  *   MODE, PASV, PORT, STRU, TYPE
  *   ABOR, DELE, LIST, NLST, MLST, MLSD
- *   APPE, RETR, STOR
+ *   APPE, REST, RETR, STOR
  *   MKD,  RMD
  *   RNTO, RNFR
  *   MDTM, MFMT
@@ -343,7 +343,7 @@ void FtpServer::clientConnected()
 {
   DEBUG_PRINTLN( F(" Client connected!") );
   client.print  (F("220--- ")); client.print(welcomeMessage); client.println(F(" ---"));
-  client.println(F("    --   By Renzo Mischianti   --"));
+  client.println(F("220 --   By Renzo Mischianti   --"));
   client.print  (F("220 --   Version ")); client.print(FTP_SERVER_VERSION); client.println(F("   --"));
   iCL = 0;
   if (FtpServer::_callback) {
@@ -784,7 +784,7 @@ bool FtpServer::processCommand()
 	client.println(F("      CDUP, CWD, PWD, QUIT, NOOP") );
 	client.println(F("      MODE, PASV, PORT, STRU, TYPE") );
 	client.println(F("      ABOR, DELE, LIST, NLST, MLST, MLSD") );
-	client.println(F("      APPE, RETR, STOR") );
+	client.println(F("      APPE, REST, RETR, STOR") );
 	client.println(F("      MKD,  RMD") );
 	client.println(F("      RNTO, RNFR") );
 	client.println(F("      MDTM, MFMT") );
