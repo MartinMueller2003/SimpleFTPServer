@@ -148,12 +148,19 @@ See `FtpServerKey.h` for config defines and defaults. Key settings:
 See the `examples/` folder for ready-to-use sketches for many platforms (ESP32, ESP8266, RP2040, STM32, Wio Terminal, Arduino). Adapt SSID, credentials and SD pins as needed.
 
 ## 📝 Changelog
+- 2025-11-22 3.0.1 Fix / Example:
+  - Add example `ESP32_SD_WiFi` demonstrating SD (SPI) + WiFi usage with SimpleFTPServer.
+  - Update ESP32 project example to initialize SD via SPI (SPI.begin() + SD.begin(CS)) and start the FTP server using the SD storage.
+  - Minor linter-friendly renames for example callbacks and improved example comments.
+
 - 2025-10-13 3.0.0 Fix: 
   - updated SdFat2 initialization for Arduino Mega; integrated W5500 initialization (example Arduino_Mega_W5500_SdFat2)
   - Fix READ WRITE APPEND problem
   - Fix ram usage
   - Set correct buffer size (Dynamic and Static)
   - Add FTP callbacks for connection events and file transfers; update data types for free space and transferred size
+  - Improve file-open handling (ensure reads start at file beginning), increase passive data connection wait time, add robust FFat dir create/remove (fallback to /ffat and POSIX), add configurable minimum free-space check before uploads
+  - Refactor FTP callback functions to use uint32_t for space parameters, improve serial output, and register callbacks for FTP events
   - Improve file-open handling (ensure reads start at file beginning), increase passive data connection wait time, add robust FFat dir create/remove (fallback to /ffat and POSIX), add configurable minimum free-space check before uploads
   - Refactor FTP callback functions to use uint32_t for space parameters, improve serial output, and register callbacks for FTP events
 - 2025-02-11 2.1.11 Management of relative and absolute path in command prompt (./ ../ /)

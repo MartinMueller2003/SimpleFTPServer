@@ -2647,13 +2647,13 @@ uint32_t FtpServer::fileSize( FTP_FILE & file ) {
 	uint8_t openMode = (uint8_t)readTypeInt;
 	#if defined(FTP_FILE_READ) && defined(FTP_FILE_WRITE_APPEND) && defined(FTP_FILE_WRITE_CREATE)
 	if (readTypeInt == FTP_FILE_READ) {
-		openMode = FILE_READ;
+		openMode = FTP_FILE_READ;
 	} else if (readTypeInt == FTP_FILE_WRITE_APPEND) {
 		// APPE: append to existing file (preserve append behavior)
-		openMode = FILE_WRITE; // underlying FILE_WRITE may include append flag where appropriate
+		openMode = FTP_FILE_WRITE_APPEND; // underlying FTP_FILE_WRITE_APPEND may include append flag where appropriate
 	} else if (readTypeInt == FTP_FILE_WRITE_CREATE) {
-		// STOR: create/overwrite; use FILE_WRITE (caller removes file before opening if needed)
-		openMode = FILE_WRITE;
+		// STOR: create/overwrite; use FTP_FILE_WRITE_CREATE (caller removes file before opening if needed)
+		openMode = FTP_FILE_WRITE_CREATE;
     } else {
 		// fallback: use provided numeric mode
 		openMode = (uint8_t)readTypeInt;
@@ -2664,12 +2664,12 @@ uint32_t FtpServer::fileSize( FTP_FILE & file ) {
 	#endif
 
 	file = STORAGE_MANAGER.open( path, openMode );
-	if (!file) { // && readTypeInt[0]==FILE_READ) {
+	if (!file) { // && readTypeInt[0]==FTP_FILE_READ) {
       return false;
     } else {
 		// Defensive: if opened in read mode, ensure pointer is at beginning
-		if (openMode == FILE_READ) {
-			// Some underlying FILE_WRITE definitions include O_APPEND; ensure we're at start
+		if (openMode == FTP_FILE_READ) {
+			// Some underlying FILE_WRITE_APPEND definitions include O_APPEND; ensure we're at start
 			file.seek(0);
 		}
 		DEBUG_PRINTLN(F("TRUE"));
@@ -2688,24 +2688,24 @@ uint32_t FtpServer::fileSize( FTP_FILE & file ) {
 	uint8_t openMode = (uint8_t)readTypeInt;
 	#if defined(FTP_FILE_READ) && defined(FTP_FILE_WRITE_APPEND) && defined(FTP_FILE_WRITE_CREATE)
 	if (readTypeInt == FTP_FILE_READ) {
-		openMode = FILE_READ;
+		openMode = FTP_FILE_READ;
 	} else if (readTypeInt == FTP_FILE_WRITE_APPEND) {
-		openMode = FILE_WRITE; // append behavior for APPE
+		openMode = FTP_FILE_WRITE_APPEND; // append behavior for APPE
 	} else if (readTypeInt == FTP_FILE_WRITE_CREATE) {
-		openMode = FILE_WRITE; // create/overwrite for STOR
+		openMode = FTP_FILE_WRITE_CREATE; // create/overwrite for STOR
     } else {
 		openMode = (uint8_t)readTypeInt;
     }
 	#else
-	openMode = (readTypeInt == 0x01) ? FILE_READ : FILE_WRITE;
+	openMode = (readTypeInt == 0x01) ? FTP_FILE_READ : FILE_WRITE;
 	#endif
 
 	file = STORAGE_MANAGER.open( path, openMode );
-	if (!file) { // && readTypeInt[0]==FILE_READ) {
+	if (!file) { // && readTypeInt[0]==FTP_FILE_READ) {
       return false;
     } else {
 		// Defensive: ensure file pointer at start when opened for read
-		if (openMode == FILE_READ) {
+		if (openMode == FTP_FILE_READ) {
 			file.seek(0);
 		}
 		DEBUG_PRINTLN(F("TRUE"));
@@ -2743,8 +2743,8 @@ uint32_t FtpServer::fileSize( FTP_FILE & file ) {
 		if (!file) {
 			return false;
 		}else{
-			// Defensive: if numeric mode indicates FILE_READ ensure pointer at start
-			if (readTypeInt == FILE_READ) {
+			// Defensive: if numeric mode indicates FTP_FILE_READ ensure pointer at start
+			if (readTypeInt == FTP_FILE_READ) {
 				file.seek(0);
 			}
 			DEBUG_PRINTLN(F("TRUE"));
@@ -2761,7 +2761,8 @@ uint32_t FtpServer::fileSize( FTP_FILE & file ) {
 		DEBUG_PRINTLN(readType);
 #if (STORAGE_TYPE == STORAGE_SD || STORAGE_TYPE == STORAGE_SD_MMC)
 		// SD library expects numeric mode (uint8_t). Map common string modes to numeric modes.
-		uint8_t mode = (readType && readType[0] == 'r') ? FILE_READ : FILE_WRITE;
+
+		auto mode = (readType && readType[0] == 'r') ? FTP_FILE_READ : FTP_FILE_WRITE_CREATE;
 		file = STORAGE_MANAGER.open( path, mode );
 		if (file && readType && readType[0] == 'r') {
 			file.seek(0);
@@ -2781,35 +2782,37 @@ uint32_t FtpServer::fileSize( FTP_FILE & file ) {
 		}
   }
 
-  // --- Add numeric-mode overloads to match header declarations ---
-  bool FtpServer::openFile( char path[ FTP_CWD_SIZE ], uint8_t readType ) {
-    return openFile((const char*)path, readType);
-  }
+	#ifndef ESP32
+	  // --- Add numeric-mode overloads to match header declarations ---
+	  bool FtpServer::openFile( char path[ FTP_CWD_SIZE ], uint8_t readType ) {
+	    return openFile((const char*)path, readType);
+	  }
 
-  bool FtpServer::openFile( const char * path, uint8_t readType ) {
-    DEBUG_PRINT(F("File to open (numeric mode) ")) ;
-    DEBUG_PRINT( path );
-    DEBUG_PRINT(F(" mode: ")) ;
-    DEBUG_PRINTLN(readType);
+	  bool FtpServer::openFile( const char * path, uint8_t readType ) {
+	    DEBUG_PRINT(F("File to open (numeric mode) ")) ;
+	    DEBUG_PRINT( path );
+	    DEBUG_PRINT(F(" mode: ")) ;
+	    DEBUG_PRINTLN(readType);
 
-#if (defined(STORAGE_MANAGER) && (STORAGE_TYPE == STORAGE_SD || STORAGE_TYPE == STORAGE_SD_MMC || STORAGE_TYPE == STORAGE_SDFAT1 || STORAGE_TYPE == STORAGE_SDFAT2))
-    // SD-like API expects numeric mode
-    file = STORAGE_MANAGER.open( path, readType );
-    if (!file && readType == FILE_READ) {
-      return false;
-    }
-    // Defensive: ensure pointer at start for read
-    if (file && readType == FILE_READ) {
-      file.seek(0);
-    }
-    DEBUG_PRINTLN(F("TRUE"));
-    return true;
-#else
-    // Fallback: try to map numeric modes to string modes and call existing const char* implementation
-    const char * sMode = (readType == FILE_READ) ? "r" : "w";
-    return openFile(path, sMode);
-#endif
-  }
+	#if (defined(STORAGE_MANAGER) && (STORAGE_TYPE == STORAGE_SD || STORAGE_TYPE == STORAGE_SD_MMC || STORAGE_TYPE == STORAGE_SDFAT1 || STORAGE_TYPE == STORAGE_SDFAT2))
+	    // SD-like API expects numeric mode
+	    file = STORAGE_MANAGER.open( path, readType );
+	    if (!file && readType == FTP_FILE_READ) {
+	      return false;
+	    }
+	    // Defensive: ensure pointer at start for read
+	    if (file && readType == FTP_FILE_READ) {
+	      file.seek(0);
+	    }
+	    DEBUG_PRINTLN(F("TRUE"));
+	    return true;
+	#else
+	    // Fallback: try to map numeric modes to string modes and call existing const char* implementation
+	    const char * sMode = (readType == FTP_FILE_READ) ? "r" : "w";
+	    return openFile(path, sMode);
+	#endif
+	  }
+	#endif
 #endif
 
 // Return true if path points to a directory
@@ -2940,8 +2943,8 @@ bool FtpServer::getFileModTime( uint16_t * pdate, uint16_t * ptime )
 #if (STORAGE_TYPE == STORAGE_SD || STORAGE_TYPE == STORAGE_SD_MMC) && !defined(ESP32)
   bool     FtpServer::rename( const char * path, const char * newpath ){
 
-		FTP_FILE myFileIn = STORAGE_MANAGER.open(path, FILE_READ);
-		FTP_FILE myFileOut = STORAGE_MANAGER.open(newpath, FILE_WRITE);
+		FTP_FILE myFileIn = STORAGE_MANAGER.open(path, FTP_FILE_READ);
+		FTP_FILE myFileOut = STORAGE_MANAGER.open(newpath, FTP_FILE_WRITE);
 
 		if(myFileOut) {
 			while (myFileIn.available() > 0)
@@ -2957,7 +2960,7 @@ bool FtpServer::getFileModTime( uint16_t * pdate, uint16_t * ptime )
 			      }
 			      // done, close the destination file
 				myFileOut.close();
-				myFileOut = STORAGE_MANAGER.open(newpath, FILE_READ);
+				myFileOut = STORAGE_MANAGER.open(newpath, FTP_FILE_READ);
 
 		}
 		bool operation = false;
