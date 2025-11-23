@@ -2705,8 +2705,12 @@ uint32_t FtpServer::fileSize( FTP_FILE & file ) {
       return false;
     } else {
 		// Defensive: ensure file pointer at start when opened for read
-		if (openMode == FTP_FILE_READ) {
-			file.seek(0);
+#if defined(FTP_FILE_READ)
+    	if (openMode == FTP_FILE_READ) {
+#else
+    	if (openMode == FILE_READ) {
+#endif
+    		file.seek(0);
 		}
 		DEBUG_PRINTLN(F("TRUE"));
 

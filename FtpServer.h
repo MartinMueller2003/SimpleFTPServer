@@ -706,8 +706,10 @@ private:
   bool openFile( char path[ FTP_CWD_SIZE ], const char * readType );
   bool openFile( const char * path, const char * readType );
   // Non-invasive overloads to accept numeric file modes (e.g. FILE_READ) without warnings
+#if !defined(ESP32)
   bool openFile( char path[ FTP_CWD_SIZE ], uint8_t readType );
   bool openFile( const char * path, uint8_t readType );
+#endif
 //  bool openFile( char path[ FTP_CWD_SIZE ], int readTypeInt );
 #endif
 //  bool openFile( char path[ FTP_CWD_SIZE ], const char * readType );
