@@ -2944,7 +2944,7 @@ bool FtpServer::getFileModTime( uint16_t * pdate, uint16_t * ptime )
   bool     FtpServer::rename( const char * path, const char * newpath ){
 
 		FTP_FILE myFileIn = STORAGE_MANAGER.open(path, FTP_FILE_READ);
-		FTP_FILE myFileOut = STORAGE_MANAGER.open(newpath, FTP_FILE_WRITE);
+		FTP_FILE myFileOut = STORAGE_MANAGER.open(newpath, FTP_FILE_WRITE_CREATE);
 
 		if(myFileOut) {
 			while (myFileIn.available() > 0)
