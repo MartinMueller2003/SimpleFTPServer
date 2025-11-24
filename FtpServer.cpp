@@ -1786,6 +1786,9 @@ bool FtpServer::doList()
 #endif
     return false;
   }
+
+  // Determine if current transfer is NLST (name list) so we only send filenames
+  bool isNlst = (transferStage == FTP_Nlst);
 #if STORAGE_TYPE == STORAGE_SPIFFS
 	#if ESP8266
 	  if( dir.next())
@@ -1795,25 +1798,17 @@ bool FtpServer::doList()
 	#endif
 	  {
 
-//		data.print( F("+r,s") );
-//	#if ESP8266
-//		data.print( long( dir.fileSize()) );
-//		data.print( F(",\t") );
-//		data.println( dir.fileName() );
-//	#else
-//		data.print( long( fileDir.size()) );
-//		data.print( F(",\t") );
-//		data.println( fileDir.name() );
-//	#endif
-
-
-
 #ifdef ESP8266
 	  String fn = dir.fileName();
 	  long fz = long( dir.fileSize());
 	  if (fn[0]=='/') { fn.remove(0, fn.lastIndexOf("/")+1); }
 	  time_t time = dir.fileTime();
-	  generateFileLine(&data, false, fn.c_str(), fz, time, this->user);
+	  if (isNlst) {
+	    data.println(fn.c_str());
+	    DEBUG_PRINTLN(fn);
+	  } else {
+	    generateFileLine(&data, false, fn.c_str(), fz, time, this->user);
+	  }
 #else
 	  long fz = long( fileDir.size());
 	  const char* fnC = fileDir.name();
@@ -1825,7 +1820,12 @@ bool FtpServer::doList()
 	  }
 
 	  time_t time = fileDir.getLastWrite();
-	  generateFileLine(&data, false, fn, fz, time, this->user);
+	  if (isNlst) {
+	    data.println(fn);
+	    DEBUG_PRINTLN(fn);
+	  } else {
+	    generateFileLine(&data, false, fn, fz, time, this->user);
+	  }
 
 #endif
 
@@ -1836,7 +1836,7 @@ bool FtpServer::doList()
 	#if defined(ESP8266) || defined(ARDUINO_ARCH_RP2040)
 	  if( dir.next())
 	#else
-#if STORAGE_TYPE == STORAGE_SEEED_SD
+	#if STORAGE_TYPE == STORAGE_SEEED_SD
 	  File fileDir = STORAGE_MANAGER.open(dir.name());
 	  fileDir = dir.openNextFile();
 #else
@@ -1847,26 +1847,26 @@ bool FtpServer::doList()
   {
 
 	#if defined(ESP8266) || defined(ARDUINO_ARCH_RP2040)
-		  long fz = long( dir.fileSize());
+		long fz = long( dir.fileSize());
 //		  const char* fn = dir.fileName().c_str();
-		  String aza = dir.fileName();
+		String aza = dir.fileName();
 		  const char* fn = aza.c_str(); //Serial.printf("test %s ", fn);
 
 //		data.print( long( dir.fileSize()) );
 //		data.print( F(",\t") );
 //		data.println( dir.fileName() );
 	#elif STORAGE_TYPE == STORAGE_SEEED_SD
-		  const char* fnC = fileDir.name();
-		  const char* fn;
-		  if ( fnC[0] == '/' ) {
-			  fn = &fnC[1];
-		  }else{
-			  fn = fnC;
-		  }
-		long fz = fileDir.size();
+		const char* fnC = fileDir.name();
+		const char* fn;
+		if ( fnC[0] == '/' ) {
+			fn = &fnC[1];
+		}else{
+			fn = fnC;
+		}
+	long fz = fileDir.size();
 	#else
-		  long fz = long( fileDir.size());
-		  const char* fn = fileDir.name();
+		long fz = long( fileDir.size());
+		const char* fn = fileDir.name();
 
 //		data.print( long( fileDir.size()) );
 //		data.print( F("\t") );
@@ -1876,15 +1876,20 @@ bool FtpServer::doList()
 //		DEBUG_PRINT( F("\t") );
 //		DEBUG_PRINTLN( fileDir.name() );
 	#endif
-	#if defined(ESP8266) || defined(ARDUINO_ARCH_RP2040)
-		time_t time = dir.fileTime();
-		generateFileLine(&data, dir.isDirectory(), fn, fz, time, this->user);
-	#elif ESP32
-		time_t time = fileDir.getLastWrite();
-		generateFileLine(&data, fileDir.isDirectory(), fn, fz, time, this->user);
-	#else
-		generateFileLine(&data, fileDir.isDirectory(), fn, fz, "Jan 01 00:00", this->user);
-	#endif
+	if (isNlst) {
+		data.println(fn);
+		DEBUG_PRINTLN(fn);
+	} else {
+		#if defined(ESP8266) || defined(ARDUINO_ARCH_RP2040)
+			time_t time = dir.fileTime();
+			generateFileLine(&data, dir.isDirectory(), fn, fz, time, this->user);
+		#elif ESP32
+			time_t time = fileDir.getLastWrite();
+			generateFileLine(&data, fileDir.isDirectory(), fn, fz, time, this->user);
+		#else
+				generateFileLine(&data, fileDir.isDirectory(), fn, fz, "Jan 01 00:00", this->user);
+		#endif
+	}
     nbMatch ++;
     return true;
   }
@@ -1893,19 +1898,24 @@ bool FtpServer::doList()
 	  if( fileDir )
 	  {
 
-//		data.print( F("+r,s") );
-//		data.print( long( fileDir.size()) );
-//		data.print( F(",\t") );
-//		data.println( fileDir.name() );
-
 		String fn = fileDir.name();
 		if (fn[0]=='/') { fn.remove(0, fn.lastIndexOf("/")+1); }
 
 #if STORAGE_TYPE == STORAGE_SD_MMC
 		time_t time = fileDir.getLastWrite();
-		generateFileLine(&data, fileDir.isDirectory(), fn.c_str(), long( fileDir.size()), time, this->user);
+		if (isNlst) {
+			data.println(fn.c_str());
+			DEBUG_PRINTLN(fn);
+		} else {
+			generateFileLine(&data, fileDir.isDirectory(), fn.c_str(), long( fileDir.size()), time, this->user);
+		}
 #else
-		generateFileLine(&data, fileDir.isDirectory(), fn.c_str(), long( fileDir.size()), "Jan 01 00:00", this->user);
+		if (isNlst) {
+			data.println(fn.c_str());
+			DEBUG_PRINTLN(fn);
+		} else {
+			generateFileLine(&data, fileDir.isDirectory(), fn.c_str(), long( fileDir.size()), "Jan 01 00:00", this->user);
+		}
 #endif
 
 		nbMatch ++;
@@ -1915,17 +1925,16 @@ bool FtpServer::doList()
 #elif STORAGE_TYPE == STORAGE_FATFS
   if( dir.nextFile())
   {
-//    if( dir.isDir()) {
-//      data.print( F("+/,\t") );
-//    } else {
-//    	data.print( F("+r,s") ); data.print( long( fileSize( file )) ); data.print( F(",\t") );
-//    }
-//    data.println( dir.fileName() );
 
 		String fn = dir.fileName();
 		if (fn[0]=='/') { fn.remove(0, fn.lastIndexOf("/")+1); }
 
-	generateFileLine(&data, dir.isDir(), fn.c_str(), long( dir.fileSize()), "Jan 01 00:00", this->user);
+	if (isNlst) {
+		data.println(fn.c_str());
+		DEBUG_PRINTLN(fn);
+	} else {
+		generateFileLine(&data, dir.isDir(), fn.c_str(), long( dir.fileSize()), "Jan 01 00:00", this->user);
+	}
 
     nbMatch ++;
     return true;
@@ -1933,16 +1942,16 @@ bool FtpServer::doList()
 #else
   if( file.openNext( &dir, FTP_FILE_READ_ONLY ))
   {
-//    if( file.isDir()) {
-//      data.print( F("+/,\t") );
-//    } else {
-//    	data.print( F("+r,s") ); data.print( long( fileSize( file )) ); data.print( F(",\t") );
-//    }
+	// For storages using file.printName, only send name in NLST mode
+	if (isNlst) {
+		file.printName(&data);
+		data.println();
+	} else {
+		generateFileLine(&data, file.isDir(), "", long( fileSize( file )), "Jan 01 00:00", this->user, false);
 
-	generateFileLine(&data, file.isDir(), "", long( fileSize( file )), "Jan 01 00:00", this->user, false);
-
-    file.printName( & data );
-    data.println();
+		file.printName( & data );
+		data.println();
+	}
     file.close();
     nbMatch ++;
     return true;
