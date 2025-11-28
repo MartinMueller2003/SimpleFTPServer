@@ -1883,7 +1883,7 @@ bool FtpServer::doList()
 		#if defined(ESP8266) || defined(ARDUINO_ARCH_RP2040)
 			time_t time = dir.fileTime();
 			generateFileLine(&data, dir.isDirectory(), fn, fz, time, this->user);
-		#elif ESP32
+		#elif defined(ESP32)
 			time_t time = fileDir.getLastWrite();
 			generateFileLine(&data, fileDir.isDirectory(), fn, fz, time, this->user);
 		#else
@@ -2082,7 +2082,7 @@ bool FtpServer::doMlsd()
 	#if defined(ESP8266) || defined(ARDUINO_ARCH_RP2040)
 		time_t time = dir.fileTime();
 		generateFileLine(&data, dir.isDirectory(), fn, fz, time, this->user);
-	#elif ESP32
+	#elif defined(ESP32)
 		time_t time = fileDir.getLastWrite();
 		generateFileLine(&data, fileDir.isDirectory(), fn, fz, time, this->user);
 	#else
