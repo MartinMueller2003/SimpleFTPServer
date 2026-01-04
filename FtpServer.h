@@ -20,7 +20,7 @@
 
 #include <FtpServerKey.h>
 
-#define FTP_SERVER_VERSION "2.1.10 (2025-01-11)"
+#define FTP_SERVER_VERSION "3.0.2 (2025-11-28)"
 
 #if ARDUINO >= 100
 #include "Arduino.h"
@@ -141,8 +141,8 @@
 		//#define FTP_CLIENT_NETWORK_SSL_CLASS WiFiClientSecure
 		#define FTP_SERVER_NETWORK_SERVER_CLASS WiFiServer
 		#define NET_CLASS WiFi
-//		#define CommandIs( a ) (command != NULL && ! strcmp_P( command, PSTR( a )))
-//		#define ParameterIs( a ) ( parameter != NULL && ! strcmp_P( parameter, PSTR( a )))
+//		#define CommandIs( a ) (command != nullptr && ! strcmp_P( command, PSTR( a )))
+//		#define ParameterIs( a ) ( parameter != nullptr && ! strcmp_P( parameter, PSTR( a )))
 #elif(FTP_SERVER_NETWORK_TYPE == NETWORK_ETHERNET_GENERIC)
 
 		#include <Ethernet_Generic.h>
@@ -152,8 +152,8 @@
 		#define NET_CLASS Ethernet
 
 //		#if defined(ESP8266) || defined(ESP32)
-//			#define CommandIs( a ) (command != NULL && ! strcmp_P( command, PSTR( a )))
-//			#define ParameterIs( a ) ( parameter != NULL && ! strcmp_P( parameter, PSTR( a )))
+//			#define CommandIs( a ) (command != nullptr && ! strcmp_P( command, PSTR( a )))
+//			#define ParameterIs( a ) ( parameter != nullptr && ! strcmp_P( parameter, PSTR( a )))
 //		#else
 //			#define CommandIs( a ) ( ! strcmp_PF( command, PSTR( a )))
 //			#define ParameterIs( a ) ( ! strcmp_PF( parameter, PSTR( a )))
@@ -167,8 +167,8 @@
 		#define NET_CLASS Ethernet
 
 //		#if defined(ESP8266) || defined(ESP32)
-//			#define CommandIs( a ) (command != NULL && ! strcmp_P( command, PSTR( a )))
-//			#define ParameterIs( a ) ( parameter != NULL && ! strcmp_P( parameter, PSTR( a )))
+//			#define CommandIs( a ) (command != nullptr && ! strcmp_P( command, PSTR( a )))
+//			#define ParameterIs( a ) ( parameter != nullptr && ! strcmp_P( parameter, PSTR( a )))
 //		#else
 //			#define CommandIs( a ) ( ! strcmp_PF( command, PSTR( a )))
 //			#define ParameterIs( a ) ( ! strcmp_PF( parameter, PSTR( a )))
@@ -181,8 +181,8 @@
 	#define FTP_SERVER_NETWORK_SERVER_CLASS UIPServer
 	#define NET_CLASS Ethernet
 //	#if define(ESP8266) || define(ESP32)
-//		#define CommandIs( a ) (command != NULL && ! strcmp_P( command, PSTR( a )))
-//		#define ParameterIs( a ) ( parameter != NULL && ! strcmp_P( parameter, PSTR( a )))
+//		#define CommandIs( a ) (command != nullptr && ! strcmp_P( command, PSTR( a )))
+//		#define ParameterIs( a ) ( parameter != nullptr && ! strcmp_P( parameter, PSTR( a )))
 //	#else
 //		#define CommandIs( a ) ( ! strcmp_PF( command, PSTR( a )))
 //		#define ParameterIs( a ) ( ! strcmp_PF( parameter, PSTR( a )))
@@ -211,8 +211,8 @@
 	//#define FTP_CLIENT_NETWORK_SSL_CLASS WiFiClientSecure
 	#define FTP_SERVER_NETWORK_SERVER_CLASS WiFiServer
 	#define NET_CLASS WiFi
-//	#define CommandIs( a ) (command != NULL && ! strcmp_P( command, PSTR( a )))
-//	#define ParameterIs( a ) ( parameter != NULL && ! strcmp_P( parameter, PSTR( a )))
+//	#define CommandIs( a ) (command != nullptr && ! strcmp_P( command, PSTR( a )))
+//	#define ParameterIs( a ) ( parameter != nullptr && ! strcmp_P( parameter, PSTR( a )))
 #elif(FTP_SERVER_NETWORK_TYPE == NETWORK_ESP32_ETH)
 
 	#include <ETH.h>
@@ -244,8 +244,8 @@
 #endif
 
 #if defined(ESP8266) || defined(ESP32) || defined(ARDUINO_ARCH_RP2040)
-	#define CommandIs( a ) (command != NULL && ! strcmp_P( command, PSTR( a )))
-	#define ParameterIs( a ) ( parameter != NULL && ! strcmp_P( parameter, PSTR( a )))
+	#define CommandIs( a ) (command != nullptr && ! strcmp_P( command, PSTR( a )))
+	#define ParameterIs( a ) ( parameter != nullptr && ! strcmp_P( parameter, PSTR( a )))
 #else
 	#define CommandIs( a ) ( ! strcmp_PF( command, PSTR( a )))
 	#define ParameterIs( a ) ( ! strcmp_PF( parameter, PSTR( a )))
@@ -272,7 +272,7 @@
 
 		#endif
 
-#if ESP8266
+#if defined(ESP8266)
 	#define FTP_FILE_READ "r"
 	#define FTP_FILE_READ_ONLY "r"
 	#define FTP_FILE_READ_WRITE "w+"
@@ -306,7 +306,7 @@
 
 	#define FILENAME_LENGTH 255
 #elif(STORAGE_TYPE == STORAGE_LITTLEFS)
-	#if ESP8266 || ARDUINO_ARCH_RP2040
+	#if defined(ESP8266) || defined(ARDUINO_ARCH_RP2040)
 		#include "LittleFS.h"
 		#define STORAGE_MANAGER LittleFS
 		#define FTP_FILE File
@@ -486,11 +486,11 @@
 
 // Setup debug printing macros.
 #ifdef FTP_SERVER_DEBUG
-	#define DEBUG_PRINT(...) { DEBUG_PRINTER.print(__VA_ARGS__); }
-	#define DEBUG_PRINTLN(...) { DEBUG_PRINTER.println(__VA_ARGS__); }
+	#define DEBUG_PRINT(...) do { DEBUG_PRINTER.print(__VA_ARGS__); } while(false)
+	#define DEBUG_PRINTLN(...) do { DEBUG_PRINTER.println(__VA_ARGS__); } while(false)
 #else
-	#define DEBUG_PRINT(...) {}
-	#define DEBUG_PRINTLN(...) {}
+	#define DEBUG_PRINT(...) do {} while(false)
+	#define DEBUG_PRINTLN(...) do {} while(false)
 #endif
 
 #define FTP_CMD_PORT 21           // Command port on which server is listening
@@ -549,6 +549,7 @@ class FtpServer
 {
 public:
   FtpServer( uint16_t _cmdPort = FTP_CMD_PORT, uint16_t _pasvPort = FTP_DATA_PORT_PASV );
+	~FtpServer(); // <-- DESTRUCTOR ADDED
 
   void    begin( const char * _user, const char * _pass, const char * welcomeMessage = "Welcome to Simply FTP server" );
   void    begin( const char * welcomeMessage = "Welcome to Simply FTP server" );
@@ -558,19 +559,20 @@ public:
   void    credentials( const char * _user, const char * _pass );
   uint8_t handleFTP();
 
-	void setCallback(void (*_callbackParam)(FtpOperation ftpOperation, unsigned int freeSpace, unsigned int totalSpace) )
+	void setCallback(void (*_callbackParam)(FtpOperation ftpOperation, uint32_t freeSpace, uint32_t totalSpace) )
 	{
 		_callback = _callbackParam;
 	}
 
-	void setTransferCallback(void (*_transferCallbackParam)(FtpTransferOperation ftpOperation, const char* name, unsigned int transferredSize) )
+	void setTransferCallback(void (*_transferCallbackParam)(FtpTransferOperation ftpOperation, const char* name, uint32_t transferredSize) )
 	{
 		_transferCallback = _transferCallbackParam;
 	}
 
 private:
-  void (*_callback)(FtpOperation ftpOperation, unsigned int freeSpace, unsigned int totalSpace){};
-  void (*_transferCallback)(FtpTransferOperation ftpOperation, const char* name, unsigned int transferredSize){};
+  // Use 32-bit sizes for callbacks to avoid truncation on platforms where "unsigned int" is 16-bit (AVR)
+  void (*_callback)(FtpOperation ftpOperation, uint32_t freeSpace, uint32_t totalSpace){};
+  void (*_transferCallback)(FtpTransferOperation ftpOperation, const char* name, uint32_t transferredSize){};
 
   void    iniVariables();
   void    clientConnected();
@@ -585,8 +587,8 @@ private:
   bool    doMlsd();
   void    closeTransfer();
   void    abortTransfer();
-  bool    makePath( char * fullName, char * param = NULL );
-  bool    makeExistsPath( char * path, char * param = NULL );
+  bool    makePath( char * fullName, char * param = nullptr );
+  bool    makeExistsPath( char * path, char * param = nullptr );
   bool    openDir( FTP_DIR * pdir );
   bool    isDir( char * path );
   uint8_t getDateTime( char * dt, uint16_t * pyear, uint8_t * pmonth, uint8_t * pday,
@@ -618,8 +620,17 @@ private:
 	  if (strcmp(path, "/") == 0) return true;
 #endif
 #if STORAGE_TYPE == STORAGE_FFAT || (STORAGE_TYPE == STORAGE_LITTLEFS && defined(ESP32))
+      // Try to open the path directly
 	  FTP_DIR f = STORAGE_MANAGER.open(path, "r");
-	  return (f == true);
+      if (f == true) return true;
+      // Some FFat builds mount at /ffat. Try with that prefix if not already present
+      if (strncmp(path, "/ffat", 6) != 0) {
+          char alt[FTP_CWD_SIZE];
+          snprintf(alt, sizeof(alt), "/ffat%s", path);
+          FTP_DIR f2 = STORAGE_MANAGER.open(alt, "r");
+          return (f2 == true);
+      }
+      return false;
 #else
 	  return STORAGE_MANAGER.exists( path );
 #endif
@@ -628,6 +639,50 @@ private:
 #if STORAGE_TYPE == STORAGE_SPIFFS
   bool     makeDir( const char * path ) { return false; };
   bool     removeDir( const char * path ) { return false; };
+#elif STORAGE_TYPE == STORAGE_FFAT
+  // FFat on ESP32 uses VFS; use POSIX mkdir/rmdir to ensure directory creation works
+  #include <sys/stat.h>
+  #include <errno.h>
+  bool     makeDir( const char * path ) {
+      DEBUG_PRINT(F("FFAT makeDir try: ")); DEBUG_PRINTLN(path);
+      // Try direct mkdir
+      if (::mkdir(path, 0777) == 0) {
+          DEBUG_PRINTLN(F("FFAT mkdir direct OK"));
+          return true;
+      }
+      DEBUG_PRINT(F("FFAT mkdir direct errno: ")); DEBUG_PRINTLN((int)errno);
+      if (errno == EEXIST) {
+          DEBUG_PRINTLN(F("FFAT mkdir direct already exists"));
+          return true;
+      }
+      // Try with /ffat prefix (some FFat mount points use /ffat)
+      if (strncmp(path, "/ffat", 6) != 0) {
+          char alt[FTP_CWD_SIZE];
+          snprintf(alt, sizeof(alt), "/ffat%s", path);
+          DEBUG_PRINT(F("FFAT makeDir try alt: ")); DEBUG_PRINTLN(alt);
+          if (::mkdir(alt, 0777) == 0) {
+              DEBUG_PRINTLN(F("FFAT mkdir alt OK"));
+              return true;
+          }
+          DEBUG_PRINT(F("FFAT mkdir alt errno: ")); DEBUG_PRINTLN((int)errno);
+          if (errno == EEXIST) {
+              DEBUG_PRINTLN(F("FFAT mkdir alt already exists"));
+              return true;
+          }
+      }
+      DEBUG_PRINTLN(F("FFAT mkdir failed"));
+      return false;
+  };
+  bool     removeDir( const char * path ) {
+      if (::rmdir(path) == 0) return true;
+      // try with /ffat prefix
+      if (strncmp(path, "/ffat", 6) != 0) {
+          char alt[FTP_CWD_SIZE];
+          snprintf(alt, sizeof(alt), "/ffat%s", path);
+          if (::rmdir(alt) == 0) return true;
+      }
+      return false;
+  };
 #else
   bool     makeDir( const char * path ) { return STORAGE_MANAGER.mkdir( path ); };
   bool     removeDir( const char * path ) { return STORAGE_MANAGER.rmdir( path ); };
@@ -650,6 +705,11 @@ private:
 #else
   bool openFile( char path[ FTP_CWD_SIZE ], const char * readType );
   bool openFile( const char * path, const char * readType );
+  // Non-invasive overloads to accept numeric file modes (e.g. FILE_READ) without warnings
+#if !defined(ESP32)
+  bool openFile( char path[ FTP_CWD_SIZE ], uint8_t readType );
+  bool openFile( const char * path, uint8_t readType );
+#endif
 //  bool openFile( char path[ FTP_CWD_SIZE ], int readTypeInt );
 #endif
 //  bool openFile( char path[ FTP_CWD_SIZE ], const char * readType );
@@ -657,26 +717,26 @@ private:
   uint32_t fileSize( FTP_FILE & file );
 
 #if STORAGE_TYPE == STORAGE_SPIFFS || STORAGE_TYPE == STORAGE_LITTLEFS
-#if ESP8266 || ARDUINO_ARCH_RP2040
+#if defined(ESP8266) || defined(ARDUINO_ARCH_RP2040)
   uint32_t capacity() {
 	  FSInfo fi;
 	  STORAGE_MANAGER.info(fi);
 
-	  return fi.totalBytes >> 1;
+      return fi.totalBytes; // return bytes (previously shifted >>1)
   };
   uint32_t free() {
 	  FSInfo fi;
 	  STORAGE_MANAGER.info(fi);
 
-	  return (fi.totalBytes - fi.usedBytes) >> 1;
+      return (fi.totalBytes - fi.usedBytes); // return bytes (previously shifted >>1)
   };
 #else
   uint32_t capacity() {
-	  return STORAGE_MANAGER.totalBytes() >> 1;
+      return STORAGE_MANAGER.totalBytes(); // return bytes (previously shifted >>1)
   };
   uint32_t free() {
 	  return (STORAGE_MANAGER.totalBytes() -
-			  STORAGE_MANAGER.usedBytes()) >> 1;
+              STORAGE_MANAGER.usedBytes()); // return bytes (previously shifted >>1)
   };
 #endif
 #elif STORAGE_TYPE == STORAGE_SD || STORAGE_TYPE == STORAGE_SD_MMC
@@ -684,11 +744,11 @@ private:
   uint32_t free() { return true; };
 #elif STORAGE_TYPE == STORAGE_SEEED_SD
   uint32_t capacity() {
-	  return STORAGE_MANAGER.totalBytes() >> 1;
+      return STORAGE_MANAGER.totalBytes(); // return bytes (previously shifted >>1)
   };
   uint32_t free() {
 	  return (STORAGE_MANAGER.totalBytes() -
-			  STORAGE_MANAGER.usedBytes()) >> 1;
+              STORAGE_MANAGER.usedBytes()); // return bytes (previously shifted >>1)
   };
 #elif STORAGE_TYPE == STORAGE_SDFAT1
   uint32_t capacity() { return STORAGE_MANAGER.card()->cardSize() >> 1; };
@@ -738,8 +798,20 @@ private:
 
   bool anonymousConnection = false;
 
+//  uint8_t  __attribute__((aligned(4))) // need to be aligned to 32bit for Esp8266 SPIClass::transferBytes()
+//           buf[ FTP_BUF_SIZE ];       // data buffer for transfers
+#ifdef DYNAMIC_TRANSFER_BUFFER
+  uint8_t* buf;                       // data buffer for transfers (dynamic)
+  size_t   ftp_buf_size;              // size of the dynamic buffer
+  // Fallback static buffer used if dynamic allocation fails (small, fixed size)
+  uint8_t  fallbackBuf[FTP_BUF_SIZE] __attribute__((aligned(4)));
+  bool     bufIsMalloced = false;     // true if buf was allocated with malloc()
+#else
   uint8_t  __attribute__((aligned(4))) // need to be aligned to 32bit for Esp8266 SPIClass::transferBytes()
-           buf[ FTP_BUF_SIZE ];       // data buffer for transfers
+           buf[ FTP_BUF_SIZE ];       // data buffer for transfers (static)
+#endif
+
+
   char     cmdLine[ FTP_CMD_SIZE ];   // where to store incoming char from client
   char     cwdName[ FTP_CWD_SIZE ];   // name of current directory
   char     rnfrName[ FTP_CWD_SIZE ];  // name of file for RNFR command

@@ -48,6 +48,95 @@
  */
 
 #include <FtpServer.h>
+#include <ctype.h>
+#include <stdlib.h>
+
+// Implementations for 8.3 helpers (only for SD on AVR)
+#if (STORAGE_TYPE == STORAGE_SD)
+#if defined(__AVR__)
+static bool is8dot3(const char* fullPath) {
+    if (fullPath == nullptr) return false;
+    const char* base = strrchr(fullPath, '/');
+    base = base ? base + 1 : fullPath;
+    if (*base == '\0') return false;
+    const char* dot = strrchr(base, '.');
+    size_t nameLen = dot ? (size_t)(dot - base) : strlen(base);
+    size_t extLen = dot ? strlen(dot + 1) : 0;
+    if (nameLen == 0 || nameLen > 8 || extLen > 3) return false;
+    for (size_t i = 0; i < nameLen; ++i) {
+        char c = base[i];
+        if (c == ' ' || c == '\0' || c == '/') return false;
+        if (!(isalnum((unsigned char)c) || strchr("-_!#$%&'()@^`{}~", c))) return false;
+    }
+    for (size_t i = 0; i < extLen; ++i) {
+        char c = dot[1 + i];
+        if (!(isalnum((unsigned char)c) || strchr("-_!#$%&'()@^`{}~", c))) return false;
+    }
+    return true;
+}
+
+#ifdef FTP_SD_TRUNCATE_8_3
+static void truncateTo8dot3(char* dest, const char* fullPath) {
+    if (fullPath == nullptr || dest == nullptr) return;
+    char tmp[FTP_CWD_SIZE];
+    strncpy(tmp, fullPath, FTP_CWD_SIZE - 1);
+    tmp[FTP_CWD_SIZE - 1] = '\0';
+
+    char* lastSlash = strrchr(tmp, '/');
+    char dir[FTP_CWD_SIZE];
+    char name[FTP_CWD_SIZE];
+    if (lastSlash) {
+        size_t dirLen = (size_t)(lastSlash - tmp) + 1; // include '/'
+        if (dirLen >= FTP_CWD_SIZE) dirLen = FTP_CWD_SIZE - 1;
+        strncpy(dir, tmp, dirLen);
+        dir[dirLen] = '\0';
+        strncpy(name, lastSlash + 1, FTP_CWD_SIZE - 1);
+        name[FTP_CWD_SIZE - 1] = '\0';
+    } else {
+        dir[0] = '\0';
+        strncpy(name, tmp, FTP_CWD_SIZE - 1);
+        name[FTP_CWD_SIZE - 1] = '\0';
+    }
+
+    char* dot = strrchr(name, '.');
+    char base[9] = {0};
+    char ext[4] = {0};
+    if (dot) {
+        size_t nlen = (size_t)(dot - name);
+        size_t bi = 0;
+        for (size_t i = 0; i < nlen && bi < 8; ++i) {
+            char c = name[i];
+            if (isalnum((unsigned char)c)) base[bi++] = toupper((unsigned char)c);
+            else base[bi++] = '_';
+        }
+        base[bi] = '\0';
+        size_t ei = 0;
+        size_t elen = strlen(dot + 1);
+        for (size_t i = 0; i < elen && ei < 3; ++i) {
+            char c = dot[1 + i];
+            if (isalnum((unsigned char)c)) ext[ei++] = toupper((unsigned char)c);
+            else ext[ei++] = '_';
+        }
+        ext[ei] = '\0';
+    } else {
+        size_t bi = 0;
+        for (size_t i = 0; i < strlen(name) && bi < 8; ++i) {
+            char c = name[i];
+            if (isalnum((unsigned char)c)) base[bi++] = toupper((unsigned char)c);
+            else base[bi++] = '_';
+        }
+        base[bi] = '\0';
+    }
+
+    if (ext[0])
+        snprintf(dest, FTP_CWD_SIZE, "%s%s.%s", dir, base, ext);
+    else
+        snprintf(dest, FTP_CWD_SIZE, "%s%s", dir, base);
+}
+#endif // FTP_SD_TRUNCATE_8_3
+
+#endif
+#endif
 
 FtpServer::FtpServer( uint16_t _cmdPort, uint16_t _pasvPort )
          : ftpServer( _cmdPort ), dataServer( _pasvPort )
@@ -59,7 +148,34 @@ FtpServer::FtpServer( uint16_t _cmdPort, uint16_t _pasvPort )
   nbMatch = 0;
   iCL = 0;
 
+#ifdef DYNAMIC_TRANSFER_BUFFER
+#if defined(ESP32) || defined(ESP8266)
+	size_t free_ram = ESP.getFreeHeap();
+	// Use 1/4 of free RAM, with a max of 4096 and a min of 512
+	ftp_buf_size = free_ram / 4;
+	if (ftp_buf_size > 4096) ftp_buf_size = 4096;
+	if (ftp_buf_size < 512) ftp_buf_size = 512;
+#else
+	// Fallback for other platforms
+	ftp_buf_size = FTP_BUF_SIZE;
+#endif
+	// Initialize pointer and flag; actual allocation done in begin()
+	buf = nullptr;
+	bufIsMalloced = false;
+#endif
   iniVariables();
+}
+
+// DESTRUCTOR
+FtpServer::~FtpServer()
+{
+#ifdef DYNAMIC_TRANSFER_BUFFER
+	if (bufIsMalloced && buf != nullptr) {
+		::free(buf); // free only if we allocated it
+		buf = nullptr;
+		bufIsMalloced = false;
+	}
+#endif
 }
 
 void FtpServer::begin( const char * _user, const char * _pass, const char * _welcomeMessage )
@@ -144,6 +260,25 @@ void FtpServer::begin( const char * _user, const char * _pass, const char * _wel
   millisDelay = 0;
   cmdStage = FTP_Stop;
   iniVariables();
+
+#ifdef DYNAMIC_TRANSFER_BUFFER
+  // Try to allocate the dynamic buffer here. If allocation fails (common on AVR) fall back to the small static buffer.
+  if (buf == nullptr) {
+		// Try malloc with the size determined in ctor
+		uint8_t* tmp = (uint8_t*) ::malloc(ftp_buf_size);
+		if (tmp != nullptr) {
+			buf = tmp;
+			bufIsMalloced = true;
+			DEBUG_PRINT(F("Allocated dynamic transfer buffer: "));
+			DEBUG_PRINTLN(ftp_buf_size);
+		} else {
+			// Allocation failed - use fallback buffer
+			buf = fallbackBuf;
+			bufIsMalloced = false;
+			DEBUG_PRINTLN(F("Warning: dynamic buffer allocation failed, using fallback buffer"));
+		}
+  }
+#endif
 }
 
 void FtpServer::begin( const char * _welcomeMessage ) {
@@ -363,7 +498,10 @@ void FtpServer::disconnectClient()
 	  FtpServer::_callback(FTP_DISCONNECT, free(), capacity());
   }
 
+  // Ensure the client socket is properly closed on all platforms
   if( client ) {
+    // Stop/close the TCP client to free the connection
+    client.stop();
   }
   if( data ) {
     data.stop();
@@ -379,7 +517,7 @@ bool FtpServer::processCommand()
   ///////////////////////////////////////
 
   // RoSchmi added the next two lines
-  DEBUG_PRINT("Command is: ");
+  DEBUG_PRINT(F("Command is: "));
   DEBUG_PRINTLN(command);
 
   //
@@ -390,7 +528,7 @@ bool FtpServer::processCommand()
 	  DEBUG_PRINT(F("USER: "));
 	  DEBUG_PRINT(parameter);
 	  DEBUG_PRINT(F(" "));
-	  DEBUG_PRINTLN(user)
+	  DEBUG_PRINTLN(user);
 
 	if (this->anonymousConnection &&  ! strcmp( parameter, user )) {
     	DEBUG_PRINTLN( F(" Anonymous authentication Ok. Waiting for commands.") );
@@ -415,9 +553,12 @@ bool FtpServer::processCommand()
   //
   else if( CommandIs( "PASS" ))
   {
-	  DEBUG_PRINT(F("PASS: ")) DEBUG_PRINTLN(pass);
-	  DEBUG_PRINT(F("PASS PARAM: ")) DEBUG_PRINTLN(parameter);
-	  DEBUG_PRINT(F("PASS OK: ")) DEBUG_PRINTLN(strcmp( parameter, pass ));
+	  DEBUG_PRINT(F("PASS: "));
+	  DEBUG_PRINTLN(pass);
+	  DEBUG_PRINT(F("PASS PARAM: "));
+	  DEBUG_PRINTLN(parameter);
+	  DEBUG_PRINT(F("PASS OK: "));
+	  DEBUG_PRINTLN(strcmp( parameter, pass ));
     if( cmdStage != FTP_Pass )
     {
       client.println(F("503 ") );
@@ -540,7 +681,7 @@ bool FtpServer::processCommand()
   //
   else if( CommandIs( "CWD" ))
   {
-    char path[ FTP_CWD_SIZE ];
+    char path[ FTP_CWD_SIZE ]{ 0 };
     if( haveParameter() && makeExistsPath( path ))
     {
       strcpy( cwdName, path );
@@ -612,7 +753,7 @@ bool FtpServer::processCommand()
 //    client.print( int( dataIp[2]) ); client.print( F(",") ); client.print( int( dataIp[3]) ); client.print( F(",") );
 //    client.print( ( dataPort >> 8 ) ); client.print( F(",") ); client.print( ( dataPort & 255 ) ); client.println( F(")") );
 
-      char buffer[64]; // Assicurati che sia abbastanza grande per contenere il messaggio
+      char buffer[64]; // Ensure the buffer is large enough to hold the message
       snprintf(buffer, sizeof(buffer),
                "227 Entering Passive Mode (%d,%d,%d,%d,%d,%d)",
                int(dataIp[0]), int(dataIp[1]), int(dataIp[2]), int(dataIp[3]),
@@ -640,7 +781,7 @@ bool FtpServer::processCommand()
     dataPort = 256 * atoi( ++ p );
     p = strchr( p, ',' );
     dataPort += atoi( ++ p );
-    if( p == NULL ) {
+    if( p == nullptr ) {
       client.println(F("501 Can't interpret parameters") );
     } else
     {
@@ -698,7 +839,7 @@ bool FtpServer::processCommand()
   //
   else if( CommandIs( "DELE" ))
   {
-    char path[ FTP_CWD_SIZE ];
+    char path[ FTP_CWD_SIZE ]{ 0 };
     if( haveParameter() && makeExistsPath( path )) {
       if( remove( path )) {
     	  if (FtpServer::_callback) {
@@ -718,12 +859,12 @@ bool FtpServer::processCommand()
   //
   else if( CommandIs( "LIST" ) || CommandIs( "NLST" ) || CommandIs( "MLSD" ))
   {
-	DEBUG_PRINT("List of file!!");
+	DEBUG_PRINTLN(F("List of file!!"));
 
     if( dataConnect()){
       if( openDir( & dir ))
       {
-    	DEBUG_PRINT("Dir opened!!");
+    	DEBUG_PRINTLN(F("Dir opened!!"));
 
         nbMatch = 0;
         if( CommandIs( "LIST" ))
@@ -734,7 +875,7 @@ bool FtpServer::processCommand()
           transferStage = FTP_Mlsd;
       }
       else {
-    	  DEBUG_PRINT("List Data stop!!");
+    	  DEBUG_PRINTLN(F("List Data stop!!"));
     	  data.stop();
       }
     }
@@ -744,7 +885,7 @@ bool FtpServer::processCommand()
   //
   else if( CommandIs( "MLST" ))
   {
-    char path[ FTP_CWD_SIZE ];
+    char path[ FTP_CWD_SIZE ]{ 0 };
     uint16_t dat=0, tim=0;
     char dtStr[ 15 ];
     bool isdir;
@@ -797,12 +938,13 @@ bool FtpServer::processCommand()
   //
   else if( CommandIs( "RETR" ))
   {
-    char path[ FTP_CWD_SIZE ];
+    char path[ FTP_CWD_SIZE ]{ 0 };
     if( haveParameter() && makeExistsPath( path )) {
       if( ! openFile( path, FTP_FILE_READ )) {
         client.print( F("450 Can't open ") ); client.print( parameter );
       } else if( dataConnect( false ))
       {
+        file.seek(0);
     	  DEBUG_PRINT( F(" Sending ") ); DEBUG_PRINT( parameter ); DEBUG_PRINT( F(" size ") ); DEBUG_PRINTLN( long( fileSize( file ))  );
 
 		  if (FtpServer::_transferCallback) {
@@ -835,40 +977,90 @@ bool FtpServer::processCommand()
   //
   else if( CommandIs( "STOR" ) || CommandIs( "APPE" ))
   {
-    char path[ FTP_CWD_SIZE ];
+    char path[ FTP_CWD_SIZE ]{ 0 };
     if( haveParameter() && makePath( path ))
     {
+#if (STORAGE_TYPE == STORAGE_SD)
+#if defined(__AVR__)
+      // On AVR with the standard SD library, filenames may need to be 8.3.
+      if (!is8dot3(path)) {
+  #ifdef FTP_SD_TRUNCATE_8_3
+        // Truncate and normalize to 8.3
+        char newPath[FTP_CWD_SIZE];
+        truncateTo8dot3(newPath, path);
+        DEBUG_PRINT(F("Filename not 8.3, truncated to: "));
+        DEBUG_PRINTLN(newPath);
+        // copy truncated path back into path
+        strncpy(path, newPath, FTP_CWD_SIZE - 1);
+        path[FTP_CWD_SIZE - 1] = '\0';
+        // also update parameter (basename) for logging/callbacks
+        char* pparam = strrchr(parameter, '/');
+        char* pname = strrchr(path, '/');
+        if (pparam) {
+            pparam++; // point to basename within original parameter buffer
+            if (pname)
+                strncpy(pparam, pname + 1, FTP_FIL_SIZE - 1);
+            else
+                strncpy(pparam, path, FTP_FIL_SIZE - 1);
+            pparam[FTP_FIL_SIZE - 1] = '\0';
+        }
+  #else
+        client.println(F("553 File name not allowed: not 8.3 format"));
+        return true;
+  #endif
+      }
+#endif
+#endif
+
       bool open;
+
+      // If STOR and file exists we remove it first to ensure overwrite
+      if (CommandIs("STOR") && exists(path)) {
+        DEBUG_PRINTLN(F("STOR - existing file will be removed for overwrite"));
+        // try to remove; ignore result, openFile with create should still work
+        remove(path);
+      }
+
       if( exists( path )) {
-    	  DEBUG_PRINTLN(F("APPEND FILE!!"));
+        DEBUG_PRINTLN(F("APPEND FILE!!"));
         open = openFile( path, ( CommandIs( "APPE" ) ? FTP_FILE_WRITE_APPEND : FTP_FILE_WRITE_CREATE ));
       } else {
-    	  DEBUG_PRINTLN(F("CREATE FILE!!"));
+        DEBUG_PRINTLN(F("CREATE FILE!!"));
         open = openFile( path, FTP_FILE_WRITE_CREATE );
       }
 
+      // Ensure any previous data connection is closed before starting
       data.stop();
-      data.flush();
+      // flush may not exist on all client types but keep for safety
+      #if defined(ESP8266) || defined(ESP32) || defined(ARDUINO_ARCH_RP2040)
+        data.flush();
+      #endif
 
       DEBUG_PRINT(F("open/create "));
       DEBUG_PRINTLN(open);
       if( ! open ){
-    	  client.print( F("451 Can't open/create ") ); client.println( parameter );
-      }else if( ! dataConnect()) // && !data.available())
+        client.print( F("451 Can't open/create ") ); client.println( parameter );
+        // ensure no dangling file
         file.close();
-      else
-      {
-    	  DEBUG_PRINT( F(" Receiving ") ); DEBUG_PRINTLN( parameter );
+        transferStage = FTP_Close;
+      } else {
+        // Try to establish data connection (this will also send 150 if successful)
+        if( ! dataConnect()) {
+          // dataConnect already sends a 425 No data connection when it fails
+          DEBUG_PRINTLN(F("Data connection failed for STOR/APPE"));
+          file.close();
+          transferStage = FTP_Close;
+        } else {
+          DEBUG_PRINT( F(" Receiving ") ); DEBUG_PRINTLN( parameter );
 
-        millisBeginTrans = millis();
-        bytesTransfered = 0;
-        transferStage = FTP_Store;
+          millisBeginTrans = millis();
+          bytesTransfered = 0;
+          transferStage = FTP_Store;
 
-		  if (FtpServer::_transferCallback) {
-
-			  FtpServer::_transferCallback(FTP_UPLOAD_START, parameter, bytesTransfered);
-		  }
-
+          if (FtpServer::_transferCallback) {
+            FtpServer::_transferCallback(FTP_UPLOAD_START, parameter, bytesTransfered);
+          }
+        }
       }
     }
   }
@@ -893,7 +1085,7 @@ bool FtpServer::processCommand()
   // Display status information about a specific file or the FTP server.
   else if (CommandIs("STAT")) {
       if (haveParameter()) {
-          char path[FTP_CWD_SIZE];
+          char path[FTP_CWD_SIZE]{ 0 };
           if (makeExistsPath(path)) {
               client.println(F("211-File status:"));
               client.print(F(" Size: "));
@@ -923,7 +1115,7 @@ bool FtpServer::processCommand()
   //
   else if( CommandIs( "MKD" ))
   {
-    char path[ FTP_CWD_SIZE ];
+    char path[ FTP_CWD_SIZE ]{ 0 };
     if( haveParameter() && makePath( path ))
     {
       if( exists( path )) {
@@ -949,7 +1141,7 @@ bool FtpServer::processCommand()
   //
   else if( CommandIs( "RMD" ))
   {
-    char path[ FTP_CWD_SIZE ];
+    char path[ FTP_CWD_SIZE ]{ 0 };
     if( haveParameter() && makeExistsPath( path )) {
       if( removeDir( path ))
       {
@@ -981,7 +1173,7 @@ bool FtpServer::processCommand()
   //
   else if( CommandIs( "RNTO" ))
   {
-    char path[ FTP_CWD_SIZE ];
+    char path[ FTP_CWD_SIZE ]{ 0 };
     char dirp[ FTP_FIL_SIZE ];
     if( strlen( rnfrName ) == 0 || ! rnfrCmd ) {
       client.println(F("503 Need RNFR before RNTO") );
@@ -993,7 +1185,7 @@ bool FtpServer::processCommand()
       {
         strcpy( dirp, path );
         char * psep = strrchr( dirp, '/' );
-        bool fail = psep == NULL;
+        bool fail = psep == nullptr;
         if( ! fail )
         {
           if( psep == dirp )
@@ -1039,7 +1231,7 @@ bool FtpServer::processCommand()
   {
     if( haveParameter())
     {
-      char path[ FTP_CWD_SIZE ];
+      char path[ FTP_CWD_SIZE ]{ 0 };
       char * fname = parameter;
       uint16_t year;
       uint8_t month, day, hour, minute, second, setTime;
@@ -1067,7 +1259,7 @@ bool FtpServer::processCommand()
           if( getFileModTime( path, &dat, &tim )) {
             client.print( F("213 ") ); client.println( makeDateTimeStr( dtStr, dat, tim ) );
           } else {
-            client.println("550 Unable to retrieve time" );
+            client.println(F("550 Unable to retrieve time") );
           }
         }
       }
@@ -1078,7 +1270,7 @@ bool FtpServer::processCommand()
   //
   else if( CommandIs( "SIZE" ))
   {
-    char path[ FTP_CWD_SIZE ];
+    char path[ FTP_CWD_SIZE ]{ 0 };
     if( haveParameter() && makeExistsPath( path )) {
       if( ! openFile( path, FTP_FILE_READ )) {
         client.print( F("450 Can't open ") ); client.println( parameter );
@@ -1122,42 +1314,79 @@ int FtpServer::dataConnect( bool out150 )
   if( ! data.connected()) {
     if( dataConn == FTP_Pasive )
     {
-      uint16_t count = 1000; // wait up to a second
-      while( ! data.connected() && count -- > 0 )
+      // wait up to 30 seconds for passive data connection (use millis-based timeout)
+      uint32_t start = millis();
+      const uint32_t timeout_ms = 30000UL; // 30 seconds
+      while( ! data.connected() && (uint32_t)(millis() - start) < timeout_ms )
       {
-		#if (FTP_SERVER_NETWORK_TYPE == NETWORK_WiFiNINA)
-    	  	  data = dataServer.available();
-		#elif (defined(ESP8266) && (FTP_SERVER_NETWORK_TYPE == NETWORK_ESP8266_ASYNC || FTP_SERVER_NETWORK_TYPE == NETWORK_ESP8266 || FTP_SERVER_NETWORK_TYPE == NETWORK_ESP8266_242)) // || defined(ARDUINO_ARCH_RP2040)
-			if( dataServer.hasClient())
-			{
-			  data.stop();
-			  data = dataServer.available();
-			}
+        #if (FTP_SERVER_NETWORK_TYPE == NETWORK_WiFiNINA)
+              data = dataServer.available();
+        #elif (defined(ESP8266) && (FTP_SERVER_NETWORK_TYPE == NETWORK_ESP8266_ASYNC || FTP_SERVER_NETWORK_TYPE == NETWORK_ESP8266 || FTP_SERVER_NETWORK_TYPE == NETWORK_ESP8266_242)) // || defined(ARDUINO_ARCH_RP2040)
+            if( dataServer.hasClient())
+            {
+              data.stop();
+              data = dataServer.available();
+            }
         #else
-			data = dataServer.accept();
+            data = dataServer.accept();
         #endif
         delay( 1 );
       }
+
+      if (!data.connected()) {
+        DEBUG_PRINTLN(F("Passive accept timed out, retrying listener once"));
+        // Try to restart listener and give it another chance (single retry)
+        dataServer.begin();
+        uint32_t start2 = millis();
+        while( ! data.connected() && (uint32_t)(millis() - start2) < timeout_ms )
+        {
+          #if (FTP_SERVER_NETWORK_TYPE == NETWORK_WiFiNINA)
+                data = dataServer.available();
+          #elif (defined(ESP8266) && (FTP_SERVER_NETWORK_TYPE == NETWORK_ESP8266_ASYNC || FTP_SERVER_NETWORK_TYPE == NETWORK_ESP8266 || FTP_SERVER_NETWORK_TYPE == NETWORK_ESP8266_242))
+                if( dataServer.hasClient())
+                {
+                  data.stop();
+                  data = dataServer.available();
+                }
+          #else
+                data = dataServer.accept();
+          #endif
+          delay( 1 );
+        }
+        if (data.connected()) {
+          DEBUG_PRINTLN(F("Passive accept succeeded on retry"));
+        } else {
+          DEBUG_PRINTLN(F("Passive accept failed after retry"));
+        }
+      }
     }
     else if( dataConn == FTP_Active )
+    {
       data.connect( dataIp, dataPort );
+      // give a small window for active connect to succeed
+      uint32_t start = millis();
+      const uint32_t timeout_ms = 10000UL; // 10 seconds for active connect
+      while( ! data.connected() && (uint32_t)(millis() - start) < timeout_ms ) {
+        delay(1);
+      }
+    }
   }
 
-//#ifdef ESP8266
+  // If connected, attempt to set NoDelay where supported to avoid Nagle delays
+  #if (defined(ESP8266) || defined(ESP32) || FTP_SERVER_NETWORK_TYPE == NETWORK_WiFiNINA)
+    // some client classes expose setNoDelay
+    #if (defined(ESP8266) || defined(ESP32))
+      if (data.connected()) data.setNoDelay(true);
+    #endif
+  #endif
+
   if( ! ( data.connected() || data.available())) {
-//#else
-//	  if( ! ( data.connected() )) {
-//#endif
     client.println(F("425 No data connection"));
   } else if( out150 ) {
     client.print( F("150 Accepted data connection to port ") ); client.println( dataPort );
   }
-//#ifdef ESP8266
-	  return  data.connected() || data.available();
-//#else
-//	  return  data.connected();
-//#endif
 
+  return  data.connected() || data.available();
 }
 
 bool FtpServer::dataConnected()
@@ -1172,7 +1401,7 @@ bool FtpServer::dataConnected()
  
 bool FtpServer::openDir( FTP_DIR * pdir )
 {
-	  DEBUG_PRINT("OpenDIR cwdName -> ");
+	  DEBUG_PRINT(F("OpenDIR cwdName -> "));
 	  DEBUG_PRINTLN(cwdName );
 
   bool openD;
@@ -1209,13 +1438,13 @@ bool FtpServer::openDir( FTP_DIR * pdir )
 	  }
 #elif STORAGE_TYPE == STORAGE_SEEED_SD
 	 if( strlen( cwdName ) == 0 ){
-	  	  DEBUG_PRINT("cwdName forced -> ");
+	  	  DEBUG_PRINT(F("cwdName forced -> "));
 	  	  DEBUG_PRINTLN(cwdName );
 
 	  	  FTP_DIR d = STORAGE_MANAGER.open( "/" );
 		  dir=d;
 	  } else {
-		  DEBUG_PRINT("cwdName -> ");
+		  DEBUG_PRINT(F("cwdName -> "));
 		  DEBUG_PRINTLN(cwdName );
 
 		  FTP_DIR d = STORAGE_MANAGER.open( cwdName );
@@ -1228,8 +1457,8 @@ bool FtpServer::openDir( FTP_DIR * pdir )
 		client.print( F("550 Can't open directory ") ); client.println( cwdName );
 	  }
 #elif STORAGE_TYPE == STORAGE_SPIFFS
-  if( cwdName == 0 || strcmp(cwdName, "/") == 0 ) {
-	  DEBUG_PRINT("DIRECTORY / EXIST ");
+  if( cwdName == nullptr || strcmp(cwdName, "/") == 0 ) {
+	  DEBUG_PRINTLN(F("DIRECTORY / EXIST "));
 #if ESP8266
 	  dir = STORAGE_MANAGER.openDir( "/" );
 #else
@@ -1275,13 +1504,75 @@ bool FtpServer::doRetrieve()
       restartPos = 0; // Reset after use
   }
 
-  int16_t nb = file.read( buf, FTP_BUF_SIZE );
+#ifdef DYNAMIC_TRANSFER_BUFFER
+  // Diagnostic log: show which buffer and size are being used
+  DEBUG_PRINT(F("Buffer ptr -> "));
+  DEBUG_PRINTLN((unsigned long)buf);
+  DEBUG_PRINT(F("ftp_buf_size -> "));
+  DEBUG_PRINTLN((unsigned long)ftp_buf_size);
+  DEBUG_PRINT(F("Using fallback? -> "));
+  DEBUG_PRINTLN(buf == fallbackBuf ? 1 : 0);
+#endif
+
+//  int16_t nb = file.read( buf, FTP_BUF_SIZE );
+#ifdef DYNAMIC_TRANSFER_BUFFER
+	int16_t nb = file.read( buf, ftp_buf_size );
+#else
+	int16_t nb = file.read( buf, FTP_BUF_SIZE );
+#endif
+
   if( nb > 0 )
   {
-    data.write( buf, nb );
+    // write() may not send everything in one call on some clients; capture return
+    int32_t written = 0;
+    written = data.write( buf, nb );
+
     DEBUG_PRINT(F("NB --> "));
     DEBUG_PRINTLN(nb);
-    bytesTransfered += nb;
+    DEBUG_PRINT(F("WRITTEN --> "));
+    DEBUG_PRINTLN(written);
+
+    if (written <= 0) {
+      DEBUG_PRINTLN(F("ERROR: data.write returned <= 0"));
+      closeTransfer();
+      return false;
+    }
+
+    // If partial write, try to send the remainder (best-effort)
+    if (written < nb) {
+      int16_t remaining = nb - written;
+      DEBUG_PRINT(F("Partial write, attempting remainder -> "));
+      DEBUG_PRINTLN(remaining);
+      const uint8_t* p = (const uint8_t*)buf + written;
+      int32_t more = data.write(p, remaining);
+      DEBUG_PRINT(F("MORE WRITTEN -> "));
+      DEBUG_PRINTLN(more);
+      if (more > 0) written += more;
+    }
+
+    // Try to flush the socket where available (ESP-specific)
+    #if defined(ESP8266) || defined(ESP32)
+      data.flush();
+    #endif
+
+    // Give the network stack a tiny moment to send data (avoid client timeouts)
+    #if defined(ESP8266) || defined(ESP32)
+      yield();
+    #else
+      delay(1);
+    #endif
+
+    // Log connection status after write to help diagnose intermittent disconnects
+    DEBUG_PRINT(F("DATA CONNECTED AFTER WRITE -> "));
+    DEBUG_PRINTLN(data.connected() ? 1 : 0);
+
+    if (!data.connected()) {
+      DEBUG_PRINTLN(F("Data socket closed by peer after write"));
+      closeTransfer();
+      return false;
+    }
+
+    bytesTransfered += written;
 
 	  if (FtpServer::_transferCallback) {
 		  FtpServer::_transferCallback(FTP_DOWNLOAD, getFileName(&file).c_str(), bytesTransfered);
@@ -1300,31 +1591,66 @@ bool FtpServer::doStore()
 {
   int16_t na = data.available();
   if( na == 0 ) {
-	  DEBUG_PRINTLN("NO DATA AVAILABLE!");
-#if FTP_SERVER_NETWORK_TYPE_SELECTED == NETWORK_SEEED_RTL8720DN
-	  data.stop();
-#endif
+    DEBUG_PRINTLN(F("NO DATA AVAILABLE!"));
+
+    // If socket is connected but no data yet, wait a short time (to tolerate small pauses)
     if( data.connected()) {
-      return true;
-    } else
-    {
+      uint16_t waitMs = 5000; // wait up to 5 seconds for first data chunk
+      uint16_t waited = 0;
+      while (data.connected() && data.available() == 0 && waited < waitMs) {
+        delay(10);
+        waited += 10;
+      }
+      na = data.available();
+      if (na == 0) {
+        // still nothing after waiting
+        DEBUG_PRINT(F("No data received after "));
+        DEBUG_PRINT(waited);
+        DEBUG_PRINTLN(F(" ms"));
+        // Decide to close transfer to avoid infinite loop and client timeout
+        closeTransfer();
+        return false;
+      }
+      // else continue and read available data below
+    }
+#if FTP_SERVER_NETWORK_TYPE_SELECTED == NETWORK_SEEED_RTL8720DN
+    else {
+      data.stop();
       closeTransfer();
       return false;
     }
+#else
+    else {
+      closeTransfer();
+      return false;
+    }
+#endif
   }
 
-  if( na > FTP_BUF_SIZE ) {
-    na = FTP_BUF_SIZE;
-  }
+//  if( na > FTP_BUF_SIZE ) {
+//    na = FTP_BUF_SIZE;
+//  }
+#ifdef DYNAMIC_TRANSFER_BUFFER
+	// Avoid signed/unsigned comparison: ensure na is positive then compare as size_t
+	if( na > 0 && static_cast<size_t>(na) > ftp_buf_size ) {
+		na = static_cast<int16_t>(ftp_buf_size);
+	}
+#else
+	// FTP_BUF_SIZE is an int constant; still ensure na is positive before comparing
+	if( na > 0 && na > FTP_BUF_SIZE ) {
+		na = FTP_BUF_SIZE;
+	}
+#endif
+
   int16_t nb = data.read((uint8_t *) buf, na );
   int16_t rc = 0;
   if( nb > 0 )
   {
-	    DEBUG_PRINT("NB -> ");
+	    DEBUG_PRINT(F("NB -> "));
 	    DEBUG_PRINTLN(nb);
 
     rc = file.write( buf, nb );
-    DEBUG_PRINT("RC -> ");
+    DEBUG_PRINT(F("RC -> "));
     DEBUG_PRINTLN(rc);
     bytesTransfered += nb;
 
@@ -1344,7 +1670,7 @@ bool FtpServer::doStore()
 
 void generateFileLine(FTP_CLIENT_NETWORK_CLASS* data, bool isDirectory, const char* fn, long fz, const char* time, const char* user, bool writeFilename = true) {
 	if( isDirectory ) {
-		//			  data.print( F("+/,\t") );
+		//			  data->print( F("+/,\t") );
 		//			  DEBUG_PRINT(F("+/,\t"));
 
 		data->print( F("drwxrwsr-x\t2\t"));
@@ -1428,7 +1754,7 @@ String makeDateTimeStrList(time_t ft, bool dateContracted = false)
 
     // check for a year != year from now
     int fileYear = _tm.tm_year;
-    time_t nowTime = time(NULL);
+    time_t nowTime = time(nullptr);
     gmtime_r(&nowTime, &_tm);
     if (fileYear == _tm.tm_year)
     {
@@ -1460,6 +1786,9 @@ bool FtpServer::doList()
 #endif
     return false;
   }
+
+  // Determine if current transfer is NLST (name list) so we only send filenames
+  bool isNlst = (transferStage == FTP_Nlst);
 #if STORAGE_TYPE == STORAGE_SPIFFS
 	#if ESP8266
 	  if( dir.next())
@@ -1469,25 +1798,17 @@ bool FtpServer::doList()
 	#endif
 	  {
 
-//		data.print( F("+r,s") );
-//	#if ESP8266
-//		data.print( long( dir.fileSize()) );
-//		data.print( F(",\t") );
-//		data.println( dir.fileName() );
-//	#else
-//		data.print( long( fileDir.size()) );
-//		data.print( F(",\t") );
-//		data.println( fileDir.name() );
-//	#endif
-
-
-
 #ifdef ESP8266
 	  String fn = dir.fileName();
 	  long fz = long( dir.fileSize());
 	  if (fn[0]=='/') { fn.remove(0, fn.lastIndexOf("/")+1); }
 	  time_t time = dir.fileTime();
-	  generateFileLine(&data, false, fn.c_str(), fz, time, this->user);
+	  if (isNlst) {
+	    data.println(fn.c_str());
+	    DEBUG_PRINTLN(fn);
+	  } else {
+	    generateFileLine(&data, false, fn.c_str(), fz, time, this->user);
+	  }
 #else
 	  long fz = long( fileDir.size());
 	  const char* fnC = fileDir.name();
@@ -1499,7 +1820,12 @@ bool FtpServer::doList()
 	  }
 
 	  time_t time = fileDir.getLastWrite();
-	  generateFileLine(&data, false, fn, fz, time, this->user);
+	  if (isNlst) {
+	    data.println(fn);
+	    DEBUG_PRINTLN(fn);
+	  } else {
+	    generateFileLine(&data, false, fn, fz, time, this->user);
+	  }
 
 #endif
 
@@ -1510,37 +1836,37 @@ bool FtpServer::doList()
 	#if defined(ESP8266) || defined(ARDUINO_ARCH_RP2040)
 	  if( dir.next())
 	#else
-#if STORAGE_TYPE == STORAGE_SEEED_SD
-	  FTP_FILE fileDir = STORAGE_MANAGER.open(dir.name());
+	#if STORAGE_TYPE == STORAGE_SEEED_SD
+	  File fileDir = STORAGE_MANAGER.open(dir.name());
 	  fileDir = dir.openNextFile();
 #else
-	  FTP_FILE fileDir = dir.openNextFile();
+	  File fileDir = dir.openNextFile();
 #endif
-	  if( fileDir )
+  if( fileDir )
 #endif
-	  {
+  {
 
 	#if defined(ESP8266) || defined(ARDUINO_ARCH_RP2040)
-		  long fz = long( dir.fileSize());
+		long fz = long( dir.fileSize());
 //		  const char* fn = dir.fileName().c_str();
-		  String aza = dir.fileName();
+		String aza = dir.fileName();
 		  const char* fn = aza.c_str(); //Serial.printf("test %s ", fn);
 
 //		data.print( long( dir.fileSize()) );
 //		data.print( F(",\t") );
 //		data.println( dir.fileName() );
 	#elif STORAGE_TYPE == STORAGE_SEEED_SD
-		  const char* fnC = fileDir.name();
-		  const char* fn;
-		  if ( fnC[0] == '/' ) {
-			  fn = &fnC[1];
-		  }else{
-			  fn = fnC;
-		  }
-		long fz = fileDir.size();
+		const char* fnC = fileDir.name();
+		const char* fn;
+		if ( fnC[0] == '/' ) {
+			fn = &fnC[1];
+		}else{
+			fn = fnC;
+		}
+	long fz = fileDir.size();
 	#else
-		  long fz = long( fileDir.size());
-		  const char* fn = fileDir.name();
+		long fz = long( fileDir.size());
+		const char* fn = fileDir.name();
 
 //		data.print( long( fileDir.size()) );
 //		data.print( F("\t") );
@@ -1550,15 +1876,20 @@ bool FtpServer::doList()
 //		DEBUG_PRINT( F("\t") );
 //		DEBUG_PRINTLN( fileDir.name() );
 	#endif
-	#if defined(ESP8266) || defined(ARDUINO_ARCH_RP2040)
-		time_t time = dir.fileTime();
-		generateFileLine(&data, dir.isDirectory(), fn, fz, time, this->user);
-	#elif ESP32
-		time_t time = fileDir.getLastWrite();
-		generateFileLine(&data, fileDir.isDirectory(), fn, fz, time, this->user);
-	#else
-		generateFileLine(&data, fileDir.isDirectory(), fn, fz, "Jan 01 00:00", this->user);
-	#endif
+	if (isNlst) {
+		data.println(fn);
+		DEBUG_PRINTLN(fn);
+	} else {
+		#if defined(ESP8266) || defined(ARDUINO_ARCH_RP2040)
+			time_t time = dir.fileTime();
+			generateFileLine(&data, dir.isDirectory(), fn, fz, time, this->user);
+		#elif defined(ESP32)
+			time_t time = fileDir.getLastWrite();
+			generateFileLine(&data, fileDir.isDirectory(), fn, fz, time, this->user);
+		#else
+				generateFileLine(&data, fileDir.isDirectory(), fn, fz, "Jan 01 00:00", this->user);
+		#endif
+	}
     nbMatch ++;
     return true;
   }
@@ -1567,15 +1898,25 @@ bool FtpServer::doList()
 	  if( fileDir )
 	  {
 
-//		data.print( F("+r,s") );
-//		data.print( long( fileDir.size()) );
-//		data.print( F(",\t") );
-//		data.println( fileDir.name() );
-
 		String fn = fileDir.name();
 		if (fn[0]=='/') { fn.remove(0, fn.lastIndexOf("/")+1); }
 
-		generateFileLine(&data, fileDir.isDirectory(), fn.c_str(), long( fileDir.size()), "Jan 01 00:00", this->user);
+#if STORAGE_TYPE == STORAGE_SD_MMC
+		time_t time = fileDir.getLastWrite();
+		if (isNlst) {
+			data.println(fn.c_str());
+			DEBUG_PRINTLN(fn);
+		} else {
+			generateFileLine(&data, fileDir.isDirectory(), fn.c_str(), long( fileDir.size()), time, this->user);
+		}
+#else
+		if (isNlst) {
+			data.println(fn.c_str());
+			DEBUG_PRINTLN(fn);
+		} else {
+			generateFileLine(&data, fileDir.isDirectory(), fn.c_str(), long( fileDir.size()), "Jan 01 00:00", this->user);
+		}
+#endif
 
 		nbMatch ++;
 		return true;
@@ -1584,17 +1925,16 @@ bool FtpServer::doList()
 #elif STORAGE_TYPE == STORAGE_FATFS
   if( dir.nextFile())
   {
-//    if( dir.isDir()) {
-//      data.print( F("+/,\t") );
-//    } else {
-//    	data.print( F("+r,s") ); data.print( long( dir.fileSize()) ); data.print( F(",\t") );
-//    }
-//    data.println( dir.fileName() );
 
 		String fn = dir.fileName();
 		if (fn[0]=='/') { fn.remove(0, fn.lastIndexOf("/")+1); }
 
-	generateFileLine(&data, dir.isDir(), fn.c_str(), long( dir.fileSize()), "Jan 01 00:00", this->user);
+	if (isNlst) {
+		data.println(fn.c_str());
+		DEBUG_PRINTLN(fn);
+	} else {
+		generateFileLine(&data, dir.isDir(), fn.c_str(), long( dir.fileSize()), "Jan 01 00:00", this->user);
+	}
 
     nbMatch ++;
     return true;
@@ -1602,28 +1942,31 @@ bool FtpServer::doList()
 #else
   if( file.openNext( &dir, FTP_FILE_READ_ONLY ))
   {
-//    if( file.isDir()) {
-//      data.print( F("+/,\t") );
-//    } else {
-//    	data.print( F("+r,s") ); data.print( long( fileSize( file )) ); data.print( F(",\t") );
-//    }
+	// For storages using file.printName, only send name in NLST mode
+	if (isNlst) {
+		file.printName(&data);
+		data.println();
+	} else {
+		generateFileLine(&data, file.isDir(), "", long( fileSize( file )), "Jan 01 00:00", this->user, false);
 
-	generateFileLine(&data, file.isDir(), "", long( fileSize( file )), "Jan 01 00:00", this->user, false);
-
-    file.printName( & data );
-    data.println();
+		file.printName( & data );
+		data.println();
+	}
     file.close();
     nbMatch ++;
     return true;
   }
 #endif
+  data.stop();
   client.print( F("226 ") ); client.print( nbMatch ); client.println( F(" matches total") );
-#if STORAGE_TYPE != STORAGE_SPIFFS && STORAGE_TYPE != STORAGE_LITTLEFS && STORAGE_TYPE != STORAGE_SEEED_SD
+#if STORAGE_TYPE != STORAGE_SPIFFS && STORAGE_TYPE != STORAGE_LITTLEFS && STORAGE_TYPE != STORAGE_SEEED_SD && STORAGE_TYPE != STORAGE_SEEED_SD
   dir.close();
 #endif
-  data.stop();
+  DEBUG_PRINTLN(F("All file read!!"));
   return false;
 }
+
+// Duplicate implementation removed here to avoid redefinition - the active doMlsd() implementation is the one earlier in this file.
 
 bool FtpServer::doMlsd()
 {
@@ -1638,7 +1981,7 @@ bool FtpServer::doMlsd()
   DEBUG_PRINTLN(F("Connected!!"));
 
 #if STORAGE_TYPE == STORAGE_SPIFFS
-	  DEBUG_PRINTLN("DIR MLSD ");
+	  DEBUG_PRINTLN(F("DIR MLSD "));
 	#if ESP8266
 	  if( dir.next())
 	#else
@@ -1646,7 +1989,7 @@ bool FtpServer::doMlsd()
 	  if( fileDir )
 	#endif
 	  {
-		  DEBUG_PRINTLN("DIR NEXT ");
+		  DEBUG_PRINTLN(F("DIR NEXT "));
 		char dtStr[ 15 ];
 
 		struct tm * timeinfo;
@@ -1692,7 +2035,7 @@ bool FtpServer::doMlsd()
 		return true;
 	  }
 #elif STORAGE_TYPE == STORAGE_LITTLEFS || STORAGE_TYPE == STORAGE_SEEED_SD || STORAGE_TYPE == STORAGE_FFAT
-	  DEBUG_PRINTLN("DIR MLSD ");
+	  DEBUG_PRINTLN(F("DIR MLSD "));
 	#if defined(ESP8266) || defined(ARDUINO_ARCH_RP2040)
 	  if( dir.next())
 	#else
@@ -1702,96 +2045,71 @@ bool FtpServer::doMlsd()
 #else
 	  File fileDir = dir.openNextFile();
 #endif
-	  DEBUG_PRINTLN(dir);
-	  DEBUG_PRINTLN(fileDir);
-	  if( fileDir )
-	#endif
-	  {
-		  DEBUG_PRINTLN("DIR NEXT ");
-		char dtStr[ 15 ];
-
-
-		#if STORAGE_TYPE == STORAGE_SEEED_SD
-				struct tm * timeinfo;
-
-				strcpy(dtStr, "19700101000000");
-		#else
-				struct tm * timeinfo;
-
-				#if defined(ESP8266) || defined(ARDUINO_ARCH_RP2040)
-					time_t time = dir.fileTime();
-				#else
-					time_t time = fileDir.getLastWrite();
-				#endif
-
-					timeinfo = localtime ( &time );
-
-					// 2000 01 01 16 06 56
-
-					strftime (dtStr,15,"%Y%m%d%H%M%S",timeinfo);
-		#endif
+  if( fileDir )
+#endif
+  {
 
 	#if defined(ESP8266) || defined(ARDUINO_ARCH_RP2040)
-		String fn = dir.fileName();
-		long fz = dir.fileSize();
-		FTP_DIR fileDir = dir;
+		  long fz = long( dir.fileSize());
+//		  const char* fn = dir.fileName().c_str();
+		  String aza = dir.fileName();
+		  const char* fn = aza.c_str(); //Serial.printf("test %s ", fn);
+
+//		data.print( long( dir.fileSize()) );
+//		data.print( F(",\t") );
+//		data.println( dir.fileName() );
 	#elif STORAGE_TYPE == STORAGE_SEEED_SD
-		String fn = fileDir.name();
-		fn.remove(0, strlen(dir.name()));
-		if (fn[0]=='/') { fn.remove(0, fn.lastIndexOf("/")+1); }
+		  const char* fnC = fileDir.name();
+		  const char* fn;
+		  if ( fnC[0] == '/' ) {
+			  fn = &fnC[1];
+		  }else{
+			  fn = fnC;
+		  }
 		long fz = fileDir.size();
 	#else
-		String fn = fileDir.name();
-		fn.remove(0, fn.lastIndexOf("/")+1);
-		long fz = fileDir.size();
+		  long fz = long( fileDir.size());
+		  const char* fn = fileDir.name();
+
+//		data.print( long( fileDir.size()) );
+//		data.print( F("\t") );
+//		data.println( fileDir.name() );
+
+//		DEBUG_PRINT( long( fileDir.size()));
+//		DEBUG_PRINT( F("\t") );
+//		DEBUG_PRINTLN( fileDir.name() );
 	#endif
-
-		data.print( F("Type=") );
-
-		data.print( ( fileDir.isDirectory() ? F("dir") : F("file")) );
-		data.print( F(";Modify=") ); data.print(dtStr);// data.print( makeDateTimeStr( dtStr, time, time) );
-		data.print( F(";Size=") ); data.print( fz );
-		data.print( F("; ") ); data.println( fn );
-
-		DEBUG_PRINT( F("Type=") );
-		DEBUG_PRINT( ( fileDir.isDirectory() ? F("dir") : F("file")) );
-
-		DEBUG_PRINT( F(";Modify=") ); DEBUG_PRINT(dtStr); //DEBUG_PRINT( makeDateTimeStr( dtStr, time, time) );
-		DEBUG_PRINT( F(";Size=") ); DEBUG_PRINT( fz );
-		DEBUG_PRINT( F("; ") ); DEBUG_PRINTLN( fn );
-
-		nbMatch ++;
-// RoSchmi: next line was commented
-#if STORAGE_TYPE == STORAGE_SEEED_SD
-		fileDir.close();
-#endif
-		return true;
-	  }
-
+	#if defined(ESP8266) || defined(ARDUINO_ARCH_RP2040)
+		time_t time = dir.fileTime();
+		generateFileLine(&data, dir.isDirectory(), fn, fz, time, this->user);
+	#elif defined(ESP32)
+		time_t time = fileDir.getLastWrite();
+		generateFileLine(&data, fileDir.isDirectory(), fn, fz, time, this->user);
+	#else
+		generateFileLine(&data, fileDir.isDirectory(), fn, fz, "Jan 01 00:00", this->user);
+	#endif
+    nbMatch ++;
+    return true;
+  }
 #elif STORAGE_TYPE == STORAGE_SD || STORAGE_TYPE == STORAGE_SD_MMC
-	  DEBUG_PRINTLN("DIR MLSD ");
+	  DEBUG_PRINTLN(F("DIR MLSD "));
 	  File fileDir = dir.openNextFile();
 	  if( fileDir )
 	  {
-		  DEBUG_PRINTLN("DIR NEXT ");
+		  DEBUG_PRINTLN(F("DIR NEXT "));
 		char dtStr[ 15 ];
 
 		// struct tm * timeinfo;
 
 		strcpy(dtStr, "19700101000000");
 
-
-//		long fz = dir.fileSize();
-		String fn = fileDir.name();
-
-//#ifdef ESP32
-		fn.remove(0, fn.lastIndexOf("/")+1);
-//#else if !defined(ESP8266)
-//		fn.remove(0, 1);
-//#endif
-
+		// Use fileDir.size() for file size and avoid redeclaring fz twice
 
 		long fz = fileDir.size();
+		String fn = fileDir.name();
+		fn.remove(0, fn.lastIndexOf("/")+1);
+
+
 
 		data.print( F("Type=") );
 
@@ -1828,7 +2146,7 @@ bool FtpServer::doMlsd()
     char dtStr[ 15 ];
     uint16_t filelwd, filelwt;
     bool gfmt = getFileModTime( & filelwd, & filelwt );
-    DEBUG_PRINT("gfmt --> ");
+    DEBUG_PRINT(F("gfmt --> "));
     DEBUG_PRINTLN(gfmt);
     if( gfmt )
     {
@@ -1849,19 +2167,34 @@ bool FtpServer::doMlsd()
     return gfmt;
   }
 #endif
+  data.stop();
   client.println(F("226-options: -a -l") );
   client.print( F("226 ") ); client.print( nbMatch ); client.println( F(" matches total") );
 #if STORAGE_TYPE != STORAGE_SPIFFS && STORAGE_TYPE != STORAGE_LITTLEFS && STORAGE_TYPE != STORAGE_SEEED_SD && STORAGE_TYPE != STORAGE_SEEED_SD
-    dir.close();
+  dir.close();
 #endif
-  data.stop();
   DEBUG_PRINTLN(F("All file read!!"));
   return false;
 }
 
+
 void FtpServer::closeTransfer()
 {
   uint32_t deltaT = (int32_t) ( millis() - millisBeginTrans );
+
+  // Stop data connection and close file before sending response
+  file.close();
+
+  // Try to flush pending data then wait briefly to improve reliability
+  #if defined(ESP8266) || defined(ESP32)
+    data.flush();
+    delay(20); // small grace period to let TCP finish sending
+  #else
+    delay(10);
+  #endif
+
+  data.stop();
+
   if( deltaT > 0 && bytesTransfered > 0 )
   {
 	  DEBUG_PRINT( F(" Transfer completed in ") ); DEBUG_PRINT( deltaT ); DEBUG_PRINTLN( F(" ms, ") );
@@ -1878,9 +2211,6 @@ void FtpServer::closeTransfer()
   }
   else
     client.println(F("226 File successfully transferred") );
-  
-  file.close();
-  data.stop();
 }
 
 void FtpServer::abortTransfer()
@@ -1926,8 +2256,10 @@ int32_t FtpServer::readChar()
     DEBUG_PRINT("-");
     DEBUG_PRINT( c );
 
-    if( c == '\\' )
+    // replace single quote (') with slash to normalize path separators
+    if( c == '\'' ) {
       c = '/';
+    }
     if( c != '\r' ){
       if( c != '\n' )
       {
@@ -1940,7 +2272,7 @@ int32_t FtpServer::readChar()
       {
         cmdLine[ iCL ] = 0;
         command[ 0 ] = 0;
-        parameter = NULL;
+        parameter = nullptr;
         // empty line?
         if( iCL == 0 )
           rc = 0;
@@ -1949,7 +2281,7 @@ int32_t FtpServer::readChar()
           rc = iCL;
           // search for space between command and parameter
           parameter = strchr( cmdLine, ' ' );
-          if( parameter != NULL )
+          if( parameter != nullptr )
           {
             if( parameter - cmdLine > 4 )
               rc = -2; // Syntax error
@@ -1970,7 +2302,7 @@ int32_t FtpServer::readChar()
       }
     }
     if( rc > 0 )
-      for( uint8_t i = 0 ; i < strlen( command ); i ++ )
+      for( uint8_t i = 0; i < strlen( command ); i ++ )
         command[ i ] = toupper( command[ i ] );
     if( rc == -2 )
     {
@@ -1983,9 +2315,9 @@ int32_t FtpServer::readChar()
 
 bool FtpServer::haveParameter()
 {
-  if( parameter != NULL && strlen( parameter ) > 0 )
+  if( parameter != nullptr && strlen( parameter ) > 0 )
     return true;
-  client.println("501 No file name" );
+  client.println(F("501 No file name") );
   return false;  
 }
 
@@ -2074,7 +2406,7 @@ int utf8_strlen(const String& str)
 
 bool FtpServer::makePath( char * fullName, char * param )
 {
-  if( param == NULL )
+  if( param == nullptr )
     param = parameter;
     
   // Root or empty?
@@ -2084,58 +2416,59 @@ bool FtpServer::makePath( char * fullName, char * param )
     return true;
   }
 
-  // Usa workingDir per tenere conto dei ".." modificati
+  // Use workingDir to account for modified ".."
   char workingDir[FTP_CWD_SIZE];
   strcpy( workingDir, cwdName );
 
-  // Processa eventuali sequenze iniziali "../" (incluso il caso di una sola "..")
-  // Ad ogni iterazione viene rimosso un livello dalla workingDir
+  // Process any leading "../" sequences (including the single ".." case)
+  // Each iteration removes one level from workingDir
   while ( (strncmp(param, "../", 3) == 0) || (strcmp(param, "..") == 0) )
   {
-    // Rimuovi la slash finale da workingDir se presente (salvaguardando la root)
+    // Remove trailing slash from workingDir if present (preserve the root)
     int len = strlen( workingDir );
-    if (len > 1 && workingDir[len - 1] == '/')
-      workingDir[len - 1] = '\0';
+    if (len > 1 && workingDir[len - 1] == '/' ) {
+      workingDir[len - 1 ] = 0;
+    }
 
-    // Trova l'ultima slash per individuare il livello superiore
+    // Find the last slash to locate the parent level
     char *lastSlash = strrchr( workingDir, '/' );
-    if (lastSlash != NULL)
+    if( lastSlash != nullptr )
     {
-      // Se l'unica slash � quella iniziale, siamo alla root
-      if (lastSlash == workingDir)
+      // If the only slash is the initial one, we're at the root
+      if( lastSlash == workingDir )
       {
-        workingDir[1] = '\0';  // Rimani in "/"
+        workingDir[1] = '\0';  // Stay at "/"
       }
       else
       {
-        *lastSlash = '\0';  // Rimuovi l'ultimo componente
+        *lastSlash = '\0';  // Remove the last component
       }
     }
     else
     {
-      // Caso imprevisto: torna in root
+      // Unexpected case: return to root
       strcpy( workingDir, "/" );
     }
 
-    // Avanza il puntatore nel parametro:
-    // Se param � esattamente "..", salta quei 2 caratteri e interrompi il ciclo.
+    // Advance the pointer in the parameter:
+    // If param is exactly "..", skip those 2 characters and exit the loop.
     if (strcmp(param, "..") == 0)
     {
-      param += 2; // Salta ".."
+      param += 2; // Skip ".."
       break;
     }
     else
     {
-      // Altrimenti, param inizia con "../": salta i primi 3 caratteri.
+      // Otherwise, param starts with "../": skip the first 3 characters.
       param += 3;
     }
   }
 
-  // Gestione del prefisso "./"
+  // Handle the "./" prefix
   if( strncmp( param, "./", 2 ) == 0 )
   {
-    param += 2; // Salta "./"
-    // Se dopo "./" non c'� nulla, restituisce la workingDir aggiornata
+    param += 2; // Skip "./"
+    // If nothing remains after "./", return the updated workingDir
     if (*param == '\0')
     {
       strcpy( fullName, workingDir );
@@ -2143,8 +2476,8 @@ bool FtpServer::makePath( char * fullName, char * param )
     }
   }
 
-  // Se il percorso � relativo, concatenalo con workingDir (aggiornato dai "../")
-  if( param[0] != '/' ) 
+  // If the path is relative, concatenate it with workingDir (updated by "../")
+  if( param[0] != '/' )
   {
     strcpy( fullName, workingDir );
     if( fullName[ strlen(fullName) - 1 ] != '/' )
@@ -2154,7 +2487,7 @@ bool FtpServer::makePath( char * fullName, char * param )
   else
     strcpy( fullName, param );
 
-  // Rimuovi una eventuale slash finale in eccesso (se non si tratta della root)
+  // Remove any trailing slash if present (unless it's root)
   uint16_t strl = strlen( fullName ) - 1;
   if( fullName[strl] == '/' && strl > 1 )
     fullName[strl] = '\0';
@@ -2193,13 +2526,23 @@ bool FtpServer::makePath( char * fullName, char * param )
 
 bool FtpServer::makeExistsPath( char * path, char * param )
 {
-	  DEBUG_PRINT( F(" CWD PATH: cwdName -> ") );
-	  DEBUG_PRINT(cwdName );
-	  DEBUG_PRINT( F(" - param ") );
-	  DEBUG_PRINT(param );
-	  DEBUG_PRINT( F(" - path ") );
-	  DEBUG_PRINTLN(path );
+  if (path == nullptr) return false;
+  path[0] = '\0';
 
+  DEBUG_PRINT( F(" CWD PATH: cwdName -> ") );
+  DEBUG_PRINT(cwdName );
+  DEBUG_PRINT( F(" - param ") );
+  if (param == nullptr) {
+    DEBUG_PRINT( F("nullptr") );
+  } else {
+    DEBUG_PRINT(param );
+  }
+  DEBUG_PRINT( F(" - path ") );
+  if (path[0] == 0) {
+    DEBUG_PRINTLN(F("not set" )); 
+  } else {
+    DEBUG_PRINTLN(path );
+  }
   if( ! makePath( path, param ))
     return false;
   // RoSchmi
@@ -2207,13 +2550,13 @@ bool FtpServer::makeExistsPath( char * path, char * param )
 #if (STORAGE_TYPE == STORAGE_SPIFFS || STORAGE_TYPE == STORAGE_SD || STORAGE_TYPE == STORAGE_SD_MMC  || STORAGE_TYPE == STORAGE_SEEED_SD)
   if (strcmp(path, "/") == 0)  return true;
 #endif
-  DEBUG_PRINT("PATH --> ")
-  DEBUG_PRINT(path)
+  DEBUG_PRINT(F("PATH --> "));
+  DEBUG_PRINT(path);
   if( exists( path )) {
-	  DEBUG_PRINTLN(" ...EXIST!")
+	  DEBUG_PRINTLN(F(" ...EXIST!"));
     return true;
   }
-  DEBUG_PRINTLN(" ...NOT EXIST!")
+  DEBUG_PRINTLN(F(" ...NOT EXIST!"));
   client.print(F("550 ")); client.print( path ); client.println( F(" not found.") );
   return false;
 }
@@ -2243,7 +2586,7 @@ uint8_t FtpServer::getDateTime( char * dt, uint16_t * pyear, uint8_t * pmonth, u
   if( strlen( parameter ) < 15 ) //|| parameter[ 14 ] != ' ' )
     return 0;
   for( i = 0; i < 14; i ++ )
-    if( ! isdigit( parameter[ i ]))
+    if( !isdigit( parameter[ i ]))
       return 0;
   for( i = 14; i < 18; i ++ )
     if( parameter[ i ] == ' ' )
@@ -2303,47 +2646,85 @@ uint32_t FtpServer::fileSize( FTP_FILE & file ) {
 
 #if (STORAGE_TYPE == STORAGE_SEEED_SD)
   bool FtpServer::openFile( char path[ FTP_CWD_SIZE ], int readTypeInt ){
-		DEBUG_PRINT(F("File to open ") );
-		DEBUG_PRINT( path );
-		DEBUG_PRINT(F(" readType ") );
-		DEBUG_PRINTLN(readTypeInt);
+    DEBUG_PRINT(F("File to open ") );
+    DEBUG_PRINT( path );
+    DEBUG_PRINT(F(" readType ") );
+    DEBUG_PRINTLN(readTypeInt);
 
-		if (readTypeInt == 0X01) {
-			readTypeInt = FILE_READ;
-		}else {
-			readTypeInt = FILE_WRITE;
+	// Map FTP readTypeInt explicitly to storage open modes.
+	// FTP_FILE_READ should open for read only. Other FTP modes (APPE/STOR) should map to write/append as appropriate.
+	uint8_t openMode = (uint8_t)readTypeInt;
+	#if defined(FTP_FILE_READ) && defined(FTP_FILE_WRITE_APPEND) && defined(FTP_FILE_WRITE_CREATE)
+	if (readTypeInt == FTP_FILE_READ) {
+		openMode = FTP_FILE_READ;
+	} else if (readTypeInt == FTP_FILE_WRITE_APPEND) {
+		// APPE: append to existing file (preserve append behavior)
+		openMode = FTP_FILE_WRITE_APPEND; // underlying FTP_FILE_WRITE_APPEND may include append flag where appropriate
+	} else if (readTypeInt == FTP_FILE_WRITE_CREATE) {
+		// STOR: create/overwrite; use FTP_FILE_WRITE_CREATE (caller removes file before opening if needed)
+		openMode = FTP_FILE_WRITE_CREATE;
+    } else {
+		// fallback: use provided numeric mode
+		openMode = (uint8_t)readTypeInt;
+    }
+	#else
+	// If FTP constants aren't available, keep previous simple mapping but avoid forcing append on reads
+	openMode = (readTypeInt == 0x01) ? FILE_READ : FILE_WRITE;
+	#endif
+
+	file = STORAGE_MANAGER.open( path, openMode );
+	if (!file) { // && readTypeInt[0]==FTP_FILE_READ) {
+      return false;
+    } else {
+		// Defensive: if opened in read mode, ensure pointer is at beginning
+		if (openMode == FTP_FILE_READ) {
+			// Some underlying FILE_WRITE_APPEND definitions include O_APPEND; ensure we're at start
+			file.seek(0);
 		}
+		DEBUG_PRINTLN(F("TRUE"));
 
-		file = STORAGE_MANAGER.open( path, readTypeInt );
-		if (!file) { // && readTypeInt[0]==FILE_READ) {
-			return false;
-		}else{
-			DEBUG_PRINTLN("TRUE");
-
-			return true;
-		}
+      return true;
+    }
 }
 #elif ((STORAGE_TYPE == STORAGE_SD || STORAGE_TYPE == STORAGE_SD_MMC) && defined(ESP8266))// FTP_SERVER_NETWORK_TYPE_SELECTED == NETWORK_ESP8266_242)
   bool FtpServer::openFile( char path[ FTP_CWD_SIZE ], int readTypeInt ){
-		DEBUG_PRINT(F("File to open ") );
-		DEBUG_PRINT( path );
-		DEBUG_PRINT(F(" readType ") );
-		DEBUG_PRINTLN(readTypeInt);
+    DEBUG_PRINT(F("File to open ") );
+    DEBUG_PRINT( path );
+    DEBUG_PRINT(F(" readType ") );
+    DEBUG_PRINTLN(readTypeInt);
 
-		if (readTypeInt == 0X01) {
-			readTypeInt = FILE_READ;
-		}else {
-			readTypeInt = FILE_WRITE;
+	// Map FTP readTypeInt explicitly to storage open modes for ESP8266 SD variants.
+	uint8_t openMode = (uint8_t)readTypeInt;
+	#if defined(FTP_FILE_READ) && defined(FTP_FILE_WRITE_APPEND) && defined(FTP_FILE_WRITE_CREATE)
+	if (readTypeInt == FTP_FILE_READ) {
+		openMode = FTP_FILE_READ;
+	} else if (readTypeInt == FTP_FILE_WRITE_APPEND) {
+		openMode = FTP_FILE_WRITE_APPEND; // append behavior for APPE
+	} else if (readTypeInt == FTP_FILE_WRITE_CREATE) {
+		openMode = FTP_FILE_WRITE_CREATE; // create/overwrite for STOR
+    } else {
+		openMode = (uint8_t)readTypeInt;
+    }
+	#else
+	openMode = (readTypeInt == 0x01) ? FTP_FILE_READ : FILE_WRITE;
+	#endif
+
+	file = STORAGE_MANAGER.open( path, openMode );
+	if (!file) { // && readTypeInt[0]==FTP_FILE_READ) {
+      return false;
+    } else {
+		// Defensive: ensure file pointer at start when opened for read
+#if defined(FTP_FILE_READ)
+    	if (openMode == FTP_FILE_READ) {
+#else
+    	if (openMode == FILE_READ) {
+#endif
+    		file.seek(0);
 		}
+		DEBUG_PRINTLN(F("TRUE"));
 
-		file = STORAGE_MANAGER.open( path, readTypeInt );
-		if (!file) { // && readTypeInt[0]==FILE_READ) {
-			return false;
-		}else{
-			DEBUG_PRINTLN("TRUE");
-
-			return true;
-		}
+      return true;
+    }
 }
 #elif (STORAGE_TYPE == STORAGE_SPIFFS || STORAGE_TYPE == STORAGE_LITTLEFS || STORAGE_TYPE == STORAGE_FFAT )
   bool FtpServer::openFile( const char * path, const char * readType ) {
@@ -2355,7 +2736,11 @@ uint32_t FtpServer::fileSize( FTP_FILE & file ) {
   		if (!file && readType[0]=='r') {
   			return false;
   		}else{
-  			DEBUG_PRINTLN("TRUE");
+			// Defensive: if opened with 'r' ensure pointer at start
+			if (readType && readType[0] == 'r') {
+				file.seek(0);
+			}
+			DEBUG_PRINTLN(F("TRUE"));
 
   			return true;
   		}
@@ -2371,7 +2756,11 @@ uint32_t FtpServer::fileSize( FTP_FILE & file ) {
 		if (!file) {
 			return false;
 		}else{
-			DEBUG_PRINTLN("TRUE");
+			// Defensive: if numeric mode indicates FTP_FILE_READ ensure pointer at start
+			if (readTypeInt == FTP_FILE_READ) {
+				file.seek(0);
+			}
+			DEBUG_PRINTLN(F("TRUE"));
 
 			return true;
 		}
@@ -2379,29 +2768,64 @@ uint32_t FtpServer::fileSize( FTP_FILE & file ) {
 
 #else
   bool FtpServer::openFile( char path[ FTP_CWD_SIZE ], const char * readType ) {
-  	return openFile( (const char*) path, readType );
-  }
-  bool FtpServer::openFile( const char * path, const char * readType ) {
-  		DEBUG_PRINT(F("File to open ") );
-  		DEBUG_PRINT( path );
-  		DEBUG_PRINT(F(" readType ") );
-  		DEBUG_PRINTLN(readType);
-  #if ((STORAGE_TYPE == STORAGE_SD || STORAGE_TYPE == STORAGE_SD_MMC) && !defined(ESP32))
-  		if (readType == 0X01) {
-  			readType = FILE_READ;
-  		}else {
-  			readType = FILE_WRITE;
-  		}
-  #endif
-  		file = STORAGE_MANAGER.open( path, readType );
-  		if (!file && readType[0]=='r') {
-  			return false;
-  		}else{
-  			DEBUG_PRINTLN("TRUE");
+		DEBUG_PRINT(F("File to open ")) ;
+		DEBUG_PRINT( path );
+		DEBUG_PRINT(F(" readType ")) ;
+		DEBUG_PRINTLN(readType);
+#if (STORAGE_TYPE == STORAGE_SD || STORAGE_TYPE == STORAGE_SD_MMC)
+		// SD library expects numeric mode (uint8_t). Map common string modes to numeric modes.
 
-  			return true;
-  		}
+		auto mode = (readType && readType[0] == 'r') ? FTP_FILE_READ : FTP_FILE_WRITE_CREATE;
+		file = STORAGE_MANAGER.open( path, mode );
+		if (file && readType && readType[0] == 'r') {
+			file.seek(0);
+		}
+#else
+		file = STORAGE_MANAGER.open( path, readType );
+		if (file && readType && readType[0] == 'r') {
+			file.seek(0);
+		}
+#endif
+		if (!file && readType[0]=='r') {
+			return false;
+		}else{
+			DEBUG_PRINTLN(F("TRUE"));
+
+			return true;
+		}
   }
+
+	#ifndef ESP32
+	  // --- Add numeric-mode overloads to match header declarations ---
+	  bool FtpServer::openFile( char path[ FTP_CWD_SIZE ], uint8_t readType ) {
+	    return openFile((const char*)path, readType);
+	  }
+
+	  bool FtpServer::openFile( const char * path, uint8_t readType ) {
+	    DEBUG_PRINT(F("File to open (numeric mode) ")) ;
+	    DEBUG_PRINT( path );
+	    DEBUG_PRINT(F(" mode: ")) ;
+	    DEBUG_PRINTLN(readType);
+
+	#if (defined(STORAGE_MANAGER) && (STORAGE_TYPE == STORAGE_SD || STORAGE_TYPE == STORAGE_SD_MMC || STORAGE_TYPE == STORAGE_SDFAT1 || STORAGE_TYPE == STORAGE_SDFAT2))
+	    // SD-like API expects numeric mode
+	    file = STORAGE_MANAGER.open( path, readType );
+	    if (!file && readType == FTP_FILE_READ) {
+	      return false;
+	    }
+	    // Defensive: ensure pointer at start for read
+	    if (file && readType == FTP_FILE_READ) {
+	      file.seek(0);
+	    }
+	    DEBUG_PRINTLN(F("TRUE"));
+	    return true;
+	#else
+	    // Fallback: try to map numeric modes to string modes and call existing const char* implementation
+	    const char * sMode = (readType == FTP_FILE_READ) ? "r" : "w";
+	    return openFile(path, sMode);
+	#endif
+	  }
+	#endif
 #endif
 
 // Return true if path points to a directory
@@ -2453,7 +2877,7 @@ bool FtpServer::isDir( char * path )
   return true;
 #else
 //  res = file.isDir();
-//  DEBUG_PRINT("IS DIRECTORY --> " );
+//  DEBUG_PRINT( "IS DIRECTORY --> " );
 //  DEBUG_PRINTLN(res);
 #endif
   file.close();
@@ -2508,7 +2932,7 @@ bool FtpServer::getFileModTime( char * path, uint16_t * pdate, uint16_t * ptime 
 #if STORAGE_TYPE != STORAGE_FATFS
 bool FtpServer::getFileModTime( uint16_t * pdate, uint16_t * ptime )
 {
-#if STORAGE_TYPE == STORAGE_SPIFFS || STORAGE_TYPE == STORAGE_LITTLEFS || STORAGE_TYPE == STORAGE_FFAT
+#if STORAGE_TYPE == STORAGE_SPIFFS || STORAGE_TYPE == STORAGE_LITTLEFS || STORAGE_TYPE == STORAGE_FFAT || STORAGE_TYPE == STORAGE_SD_MMC
 	#if defined(ESP8266) || defined(ARDUINO_ARCH_RP2040)
 		return dir.fileTime();
 	#else
@@ -2532,25 +2956,31 @@ bool FtpServer::getFileModTime( uint16_t * pdate, uint16_t * ptime )
 #if (STORAGE_TYPE == STORAGE_SD || STORAGE_TYPE == STORAGE_SD_MMC) && !defined(ESP32)
   bool     FtpServer::rename( const char * path, const char * newpath ){
 
-		FTP_FILE myFileIn = STORAGE_MANAGER.open(path, FILE_READ);
-		FTP_FILE myFileOut = STORAGE_MANAGER.open(newpath, FILE_WRITE);
+		FTP_FILE myFileIn = STORAGE_MANAGER.open(path, FTP_FILE_READ);
+		FTP_FILE myFileOut = STORAGE_MANAGER.open(newpath, FTP_FILE_WRITE_CREATE);
 
 		if(myFileOut) {
 			while (myFileIn.available() > 0)
 			      {
-			        int i = myFileIn.readBytes((char*)buf, FTP_BUF_SIZE);
+//			        int i = myFileIn.readBytes((char*)buf, FTP_BUF_SIZE);
+#ifdef DYNAMIC_TRANSFER_BUFFER
+				int i = myFileIn.readBytes((char*)buf, ftp_buf_size);
+#else
+				int i = myFileIn.readBytes((char*)buf, FTP_BUF_SIZE);
+#endif
+
 			        myFileOut.write(buf, i);
 			      }
 			      // done, close the destination file
 				myFileOut.close();
-				myFileOut = STORAGE_MANAGER.open(newpath, FILE_READ);
+				myFileOut = STORAGE_MANAGER.open(newpath, FTP_FILE_READ);
 
 		}
 		bool operation = false;
 
 		DEBUG_PRINT(F("RENAME --> "));
 		DEBUG_PRINT(myFileIn.size());
-		DEBUG_PRINT(" size ");
+		DEBUG_PRINT(F(" size "));
 		DEBUG_PRINTLN(myFileOut.size());
 
 		if (myFileIn.size() == myFileOut.size()) {
