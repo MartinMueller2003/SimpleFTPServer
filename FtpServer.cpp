@@ -367,7 +367,7 @@ uint8_t FtpServer::handleFTP() {
 //				DEBUG_PRINTLN(F("CLIENT STOP!!"));
 //			}
 			byte status;
-			client = ftpServer.available(&status);
+			client = ftpServer.accept(&status);
 			/*
 			 *   CLOSED      = 0,
   LISTEN      = 1,
@@ -388,7 +388,7 @@ uint8_t FtpServer::handleFTP() {
 		  if( ftpServer.hasClient())
 		  {
 		    client.stop();
-		    client = ftpServer.available();
+		    client = ftpServer.accept();
 		  }
 #else
 			if (client && !client.connected()) {
@@ -1320,12 +1320,12 @@ int FtpServer::dataConnect( bool out150 )
       while( ! data.connected() && (uint32_t)(millis() - start) < timeout_ms )
       {
         #if (FTP_SERVER_NETWORK_TYPE == NETWORK_WiFiNINA)
-              data = dataServer.available();
+              data = dataServer.accept();
         #elif (defined(ESP8266) && (FTP_SERVER_NETWORK_TYPE == NETWORK_ESP8266_ASYNC || FTP_SERVER_NETWORK_TYPE == NETWORK_ESP8266 || FTP_SERVER_NETWORK_TYPE == NETWORK_ESP8266_242)) // || defined(ARDUINO_ARCH_RP2040)
             if( dataServer.hasClient())
             {
               data.stop();
-              data = dataServer.available();
+              data = dataServer.accept();
             }
         #else
             data = dataServer.accept();
@@ -1341,12 +1341,12 @@ int FtpServer::dataConnect( bool out150 )
         while( ! data.connected() && (uint32_t)(millis() - start2) < timeout_ms )
         {
           #if (FTP_SERVER_NETWORK_TYPE == NETWORK_WiFiNINA)
-                data = dataServer.available();
+                data = dataServer.accept();
           #elif (defined(ESP8266) && (FTP_SERVER_NETWORK_TYPE == NETWORK_ESP8266_ASYNC || FTP_SERVER_NETWORK_TYPE == NETWORK_ESP8266 || FTP_SERVER_NETWORK_TYPE == NETWORK_ESP8266_242))
                 if( dataServer.hasClient())
                 {
                   data.stop();
-                  data = dataServer.available();
+                  data = dataServer.accept();
                 }
           #else
                 data = dataServer.accept();
