@@ -149,17 +149,8 @@ FtpServer::FtpServer( uint16_t _cmdPort, uint16_t _pasvPort )
   iCL = 0;
 
 #ifdef DYNAMIC_TRANSFER_BUFFER
-#if defined(ESP32) || defined(ESP8266)
-	size_t free_ram = ESP.getFreeHeap();
-	// Use 1/4 of free RAM, with a max of 4096 and a min of 512
-	ftp_buf_size = free_ram / 4;
-	if (ftp_buf_size > 4096) ftp_buf_size = 4096;
-	if (ftp_buf_size < 512) ftp_buf_size = 512;
-#else
-	// Fallback for other platforms
+	// The transfer buffer is allocated when a transfer starts and released when it ends.
 	ftp_buf_size = FTP_BUF_SIZE;
-#endif
-	// Initialize pointer and flag; actual allocation done in begin()
 	buf = nullptr;
 	bufIsMalloced = false;
 #endif
@@ -177,6 +168,45 @@ FtpServer::~FtpServer()
 	}
 #endif
 }
+
+#ifdef DYNAMIC_TRANSFER_BUFFER
+// Allocate the transfer buffer for a data transfer. It is sized from the heap that is
+// free at this moment (one quarter, capped at FTP_BUF_SIZE_MAX) and falls back to the
+// static buffer when that allocation fails or would not be larger than the static one.
+void FtpServer::allocateTransferBuffer()
+{
+  if (buf != nullptr) {
+    return;
+  }
+#if defined(ESP32) || defined(ESP8266)
+  size_t wanted = ESP.getFreeHeap() / 4;
+  if (wanted > FTP_BUF_SIZE_MAX) wanted = FTP_BUF_SIZE_MAX;
+#else
+  size_t wanted = FTP_BUF_SIZE;
+#endif
+  uint8_t* tmp = (wanted > FTP_BUF_SIZE) ? (uint8_t*) ::malloc(wanted) : nullptr;
+  if (tmp != nullptr) {
+    buf = tmp;
+    ftp_buf_size = wanted;
+    bufIsMalloced = true;
+    DEBUG_PRINT(F("Allocated transfer buffer: ")); DEBUG_PRINTLN(ftp_buf_size);
+  } else {
+    buf = fallbackBuf;
+    ftp_buf_size = FTP_BUF_SIZE;
+    bufIsMalloced = false;
+  }
+}
+
+// Release the transfer buffer once a transfer has finished or was aborted.
+void FtpServer::releaseTransferBuffer()
+{
+  if (bufIsMalloced && buf != nullptr) {
+    ::free(buf);
+  }
+  buf = nullptr;
+  bufIsMalloced = false;
+}
+#endif
 
 void FtpServer::begin( const char * _user, const char * _pass, const char * _welcomeMessage )
 {
@@ -261,24 +291,6 @@ void FtpServer::begin( const char * _user, const char * _pass, const char * _wel
   cmdStage = FTP_Stop;
   iniVariables();
 
-#ifdef DYNAMIC_TRANSFER_BUFFER
-  // Try to allocate the dynamic buffer here. If allocation fails (common on AVR) fall back to the small static buffer.
-  if (buf == nullptr) {
-		// Try malloc with the size determined in ctor
-		uint8_t* tmp = (uint8_t*) ::malloc(ftp_buf_size);
-		if (tmp != nullptr) {
-			buf = tmp;
-			bufIsMalloced = true;
-			DEBUG_PRINT(F("Allocated dynamic transfer buffer: "));
-			DEBUG_PRINTLN(ftp_buf_size);
-		} else {
-			// Allocation failed - use fallback buffer
-			buf = fallbackBuf;
-			bufIsMalloced = false;
-			DEBUG_PRINTLN(F("Warning: dynamic buffer allocation failed, using fallback buffer"));
-		}
-  }
-#endif
 }
 
 void FtpServer::begin( const char * _welcomeMessage ) {
@@ -288,6 +300,9 @@ void FtpServer::begin( const char * _welcomeMessage ) {
 
 void FtpServer::end()
 {
+#ifdef DYNAMIC_TRANSFER_BUFFER
+    releaseTransferBuffer();
+#endif
     if(client.connected()) {
         disconnectClient();
     }
@@ -1516,6 +1531,7 @@ bool FtpServer::doRetrieve()
 
 //  int16_t nb = file.read( buf, FTP_BUF_SIZE );
 #ifdef DYNAMIC_TRANSFER_BUFFER
+	allocateTransferBuffer();
 	int16_t nb = file.read( buf, ftp_buf_size );
 #else
 	int16_t nb = file.read( buf, FTP_BUF_SIZE );
@@ -1632,6 +1648,7 @@ bool FtpServer::doStore()
 //  }
 #ifdef DYNAMIC_TRANSFER_BUFFER
 	// Avoid signed/unsigned comparison: ensure na is positive then compare as size_t
+	allocateTransferBuffer();
 	if( na > 0 && static_cast<size_t>(na) > ftp_buf_size ) {
 		na = static_cast<int16_t>(ftp_buf_size);
 	}
@@ -2184,6 +2201,9 @@ void FtpServer::closeTransfer()
 
   // Stop data connection and close file before sending response
   file.close();
+#ifdef DYNAMIC_TRANSFER_BUFFER
+  releaseTransferBuffer();
+#endif
 
   // Try to flush pending data then wait briefly to improve reliability
   #if defined(ESP8266) || defined(ESP32)
@@ -2233,6 +2253,9 @@ void FtpServer::abortTransfer()
 //  if( data.connected())
   data.stop(); 
   restartPos = 0; // Reset restart position on abort
+#ifdef DYNAMIC_TRANSFER_BUFFER
+  releaseTransferBuffer();
+#endif
 
 }
 
