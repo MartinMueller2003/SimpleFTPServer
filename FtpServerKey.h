@@ -153,4 +153,9 @@ https://github.com/arduino-libraries/Ethernet/issues/88
   #endif
 #endif
 
+// Upper bound for the dynamically sized transfer buffer (ESP32 / ESP8266)
+#ifndef FTP_BUF_SIZE_MAX
+  #define FTP_BUF_SIZE_MAX 4096
+#endif
+
 #endif // FTP_SERVER_CONFIG_H

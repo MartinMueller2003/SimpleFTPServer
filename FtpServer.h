@@ -587,6 +587,10 @@ private:
   bool    doMlsd();
   void    closeTransfer();
   void    abortTransfer();
+#ifdef DYNAMIC_TRANSFER_BUFFER
+  void    allocateTransferBuffer();
+  void    releaseTransferBuffer();
+#endif
   bool    makePath( char * fullName, char * param = nullptr );
   bool    makeExistsPath( char * path, char * param = nullptr );
   bool    openDir( FTP_DIR * pdir );
